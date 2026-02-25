@@ -2,6 +2,7 @@ mod coordinator;
 mod model_runner;
 mod iroh_executor;
 mod plan;
+mod swarm_planner;
 pub mod rpc;
 pub mod tensor_frame;
 pub mod kv_cache;
@@ -15,6 +16,7 @@ pub use coordinator::{
 };
 pub use iroh_executor::IrohDistributedExecutor;
 pub use plan::{RoundRobinPlanner, ShardPlan, ShardSpec};
+pub use swarm_planner::SwarmPlanner;
 pub use tensor_frame::TensorFrame;
 
 #[cfg(feature = "burn")]

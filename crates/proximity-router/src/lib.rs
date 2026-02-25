@@ -1,5 +1,8 @@
 use std::cmp::Ordering;
 
+pub mod swarm;
+pub use swarm::{LayerRange, SwarmPeer, SwarmRegistry};
+
 pub type PeerId = String;
 
 #[derive(Debug, Clone)]

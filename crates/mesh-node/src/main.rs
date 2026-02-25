@@ -14,15 +14,16 @@ use protocol::INFERENCE_ALPN;
 #[allow(unused_imports)]
 use server::{InferenceServer, MockInferenceServer};
 use inference::{infer_http, infer_local_exec, ChatMessage, LocalExecConfig};
-use inference_coordinator::{ModelShardRunner, ModelShardRunnerConfig, Coordinator, EchoExecutor, InferenceRequest, IrohDistributedExecutor, RoundRobinPlanner, ShardPlan};
+use inference_coordinator::{ModelShardRunner, ModelShardRunnerConfig, Coordinator, EchoExecutor, InferenceRequest, IrohDistributedExecutor, RoundRobinPlanner, ShardPlan, SwarmPlanner};
 use api::{serve as serve_api, ApiConfig};
 use model_config::{estimate_required_vram_gb, estimate_weights_gb, EstimateInput, ModelConfig};
 use n0_future::StreamExt;
-use proximity_router::{PeerId, PeerInfo, PeerMetrics, ProximityRouter, RttProbe};
+use proximity_router::{PeerId, PeerInfo, PeerMetrics, ProximityRouter, RttProbe, SwarmRegistry};
+use proximity_router::swarm::LayerRange;
 use scheduler::{select_best, ModelCandidate, SelectionError, SelectionKey};
 use protocol::{
-    parse_capability, parse_models, parse_ping, parse_pong, CapabilityPayload, ModelSummary,
-    ModelsAnnouncement, NodeRole, PingMessage, PongMessage,
+    parse_capability, parse_models, parse_ping, parse_pong, CapabilityPayload, HostedLayerRange,
+    ModelSummary, ModelsAnnouncement, NodeRole, PingMessage, PongMessage,
 };
 use persist::{PersistedModels, PersistedState, StateStore};
 use serde::{Deserialize, Serialize};
@@ -393,10 +394,114 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
     }
 
     if executor_name == "iroh" {
-        // Real distributed execution via tensor pipeline: opens QUIC streams to each peer.
+        // Static peer list: open QUIC streams to each caller-supplied peer,
+        // with SwarmRegistry for reputation tracking and failover.
         let endpoint = Endpoint::bind().await?;
-        let executor = IrohDistributedExecutor::new(endpoint);
+        let registry = Arc::new(RwLock::new(SwarmRegistry::new(StdDuration::from_secs(300))));
+
+        // Pre-populate registry with the static peers so failover can work
+        for peer_id in &peers {
+            registry.write().await.upsert(
+                peer_id.clone(),
+                proximity_router::PeerMetrics {
+                    rtt_ms: 50.0,
+                    bandwidth_mbps: 500.0,
+                    reliability: 0.9,
+                    gpu_capacity_score: 0.8,
+                    free_vram_gb: None,
+                    last_seen_epoch_ms: None,
+                },
+                vec![],  // layer info unknown for static peers
+                0.0,
+                0,
+            );
+        }
+
+        let max_retries: usize = get_arg(args, "--max-retries")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+
+        let executor = IrohDistributedExecutor::new(endpoint)
+            .with_registry(registry, &model_name, max_retries);
         let coordinator = Coordinator::new(plan, executor);
+        let output = coordinator.generate(request).await?;
+        println!("output: {output}");
+        return Ok(());
+    }
+
+    if executor_name == "swarm" {
+        // Dynamic swarm mode: join gossip to discover peers, then use SwarmPlanner.
+        let topic_hex = get_arg(args, "--topic")
+            .ok_or_else(|| anyhow!("--topic <64-hex> is required for swarm executor"))?;
+        let topic = parse_topic_id(&topic_hex)?;
+        let bootstrap_ids = parse_bootstrap_ids(args)?;
+
+        let discover_secs: u64 = get_arg(args, "--discover-secs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+        let max_retries: usize = get_arg(args, "--max-retries")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let layers_per_shard: usize = get_arg(args, "--layers-per-shard")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or((total_layers / peers.len().max(1)).max(1));
+
+        let endpoint = Endpoint::bind().await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let _router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .spawn();
+
+        println!("joining gossip topic {topic_hex}, discovering peers for {discover_secs}s...");
+        let registry = Arc::new(RwLock::new(SwarmRegistry::new(StdDuration::from_secs(120))));
+        let registry_clone = registry.clone();
+
+        let (_, mut recv) = gossip.subscribe(topic, bootstrap_ids).await?.split();
+        let discovery = tokio::spawn(async move {
+            while let Some(Ok(Event::Received(msg))) = recv.next().await {
+                let body = String::from_utf8_lossy(&msg.content);
+                if let Some(caps) = parse_capability(&body) {
+                    let layers: Vec<LayerRange> = caps
+                        .layers_hosted
+                        .iter()
+                        .cloned()
+                        .map(LayerRange::from)
+                        .collect();
+                    let metrics = proximity_router::PeerMetrics {
+                        rtt_ms: caps.rtt_ms,
+                        bandwidth_mbps: caps.bandwidth_mbps,
+                        reliability: caps.reliability,
+                        gpu_capacity_score: caps.gpu_capacity_score,
+                        free_vram_gb: Some(caps.free_vram_gb),
+                        last_seen_epoch_ms: None,
+                    };
+                    registry_clone.write().await.upsert(
+                        caps.node_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
+                    );
+                    println!("  discovered peer {}", caps.node_id);
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_secs(discover_secs)).await;
+        discovery.abort();
+
+        let peer_count = registry.read().await.peer_count();
+        println!("discovered {peer_count} peer(s). planning inference...");
+
+        let planner = SwarmPlanner::new(layers_per_shard);
+        let swarm_plan = {
+            let reg = registry.read().await;
+            planner.plan(&model_name, total_layers, &reg)?
+        };
+        println!("shard plan: {} shards", swarm_plan.shards.len());
+        for s in &swarm_plan.shards {
+            println!("  shard layers={}..{} peer={}", s.layer_start, s.layer_end, s.peer_id);
+        }
+
+        let executor = IrohDistributedExecutor::new(endpoint)
+            .with_registry(registry, &model_name, max_retries);
+        let coordinator = Coordinator::new(swarm_plan, executor);
         let output = coordinator.generate(request).await?;
         println!("output: {output}");
         return Ok(());
@@ -615,6 +720,11 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
         "bootstrap_cmd: cargo run -p mesh-node -- gossip --topic {topic_hex} --bootstrap {node_id_str}"
     );
 
+    // ── Swarm registry (soft-state, peer_ttl = 3× announce interval) ─────────
+    let swarm_ttl = std::time::Duration::from_secs(interval_secs * 3 + 30);
+    let swarm_registry: Arc<RwLock<SwarmRegistry>> =
+        Arc::new(RwLock::new(SwarmRegistry::new(swarm_ttl)));
+
     let (sender, mut receiver) = gossip.subscribe(topic, bootstrap).await?.split();
     let sender_for_recv = sender.clone();
     let node_id_for_recv = node_id_str.clone();
@@ -681,6 +791,7 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
 
     let mut ticker = interval(Duration::from_secs(interval_secs.max(1)));
     let state_clone = state.clone();
+    let swarm_clone = swarm_registry.clone();
     let recv_task = tokio::spawn(async move {
         while let Some(event) = receiver.next().await {
             match event {
@@ -693,15 +804,40 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
                             st.mark_seen(&caps.node_id, now_millis());
                             st.clear_failure(&caps.node_id);
                         }
+                        // Register peer in the swarm registry for dynamic routing
+                        {
+                            let layer_ranges: Vec<LayerRange> = caps
+                                .layers_hosted
+                                .iter()
+                                .cloned()
+                                .map(LayerRange::from)
+                                .collect();
+                            let metrics = PeerMetrics {
+                                rtt_ms: caps.rtt_ms,
+                                bandwidth_mbps: caps.bandwidth_mbps,
+                                reliability: caps.reliability,
+                                gpu_capacity_score: caps.gpu_capacity_score,
+                                free_vram_gb: Some(caps.free_vram_gb),
+                                last_seen_epoch_ms: Some(now_millis() as u64),
+                            };
+                            swarm_clone
+                                .write()
+                                .await
+                                .upsert(
+                                    caps.node_id.clone(),
+                                    metrics,
+                                    layer_ranges,
+                                    caps.load_score,
+                                    caps.uptime_secs,
+                                );
+                        }
                         println!(
-                            "capability from {}: role={:?} vram={}GB bw={}Mbps rel={} gpu_score={} rtt_ms={}",
+                            "capability from {}: role={:?} vram={}GB bw={}Mbps layers={}",
                             caps.node_id,
                             caps.role,
                             caps.free_vram_gb,
                             caps.bandwidth_mbps,
-                            caps.reliability,
-                            caps.gpu_capacity_score,
-                            caps.rtt_ms
+                            caps.layers_hosted.len(),
                         );
                     } else if let Some(announcement) = parse_models(&body) {
                         {
@@ -1638,6 +1774,9 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
         context,
         quant_bits,
         role,
+        layers_hosted: Vec::new(),
+        load_score: 0.0,
+        uptime_secs: 0,
     };
     (payload, available_gb)
 }
@@ -1788,7 +1927,9 @@ fn print_usage() {
     println!("mesh-node estimate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--nodes 4] [--kv-bytes 1] [--overhead 1.15] [--runtime-overhead 0.15]");
     println!("mesh-node capacity --free-vram 8 [--max-nodes 8] [--current-nodes 2] [--seq 4096] [--quant 4] [--kv-bytes 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
     println!("mesh-node dist-plan --peers id1,id2 [--min-layers-per-peer 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
-    println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|burn|iroh --model-path /path/to/model.safetensors --model-device ndarray|wgpu --model-mode simulate|mlp|weights|forward|embed --model-hidden 8 --model-tensor NAME --model-sample-bytes 256]");
+    println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|burn|iroh|swarm] [--max-retries 2]");
+    println!("  iroh executor:  --peers id1,id2 --max-retries 2");
+    println!("  swarm executor: --topic <64-hex> --bootstrap <endpoint_id> [--discover-secs 5] [--layers-per-shard 16] [--max-retries 2]");
     println!("mesh-node serve [--model-path /path/to/model.safetensors --layer-start 0 --layer-end 16 --total-layers 32 --hidden 4096 --intermediate 11008 --vocab 32000 --heads 32 --kv-heads 32 --rope-theta 10000] [--kv-ttl-secs 300]");
     println!("mesh-node simulate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--peers peers.json] [--rtt-samples rtt.json]");
     println!("mesh-node gossip --topic <64-hex> [--bootstrap <endpoint_id> ...] [--interval 10] [--rtt-probe] [--rtt-timeout-ms 3000] [--peer-ttl-ms 15000] [--peer-fail-threshold 3] [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000] [--load-penalty 0.05] [--load-decay 0.9] [--config config.json] [--params-b 117] [--model-name primary] [--models models.json] [--fallback-model name:/path/to/config.json:params_b] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--free-vram 48] [--reserve-gb 4] [--safety-factor 0.7] [--min-inference-gb 6] [--role inference|routing|cache] [--state-dir state] [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8] [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]");
