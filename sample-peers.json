@@ -1,0 +1,50 @@
+[
+  {
+    "id": "node-a",
+    "rtt_ms": 12,
+    "bandwidth_mbps": 1200,
+    "reliability": 0.98,
+    "gpu_capacity_score": 0.9,
+    "free_vram_gb": 80
+  },
+  {
+    "id": "node-b",
+    "rtt_ms": 18,
+    "bandwidth_mbps": 800,
+    "reliability": 0.96,
+    "gpu_capacity_score": 0.8,
+    "free_vram_gb": 48
+  },
+  {
+    "id": "node-c",
+    "rtt_ms": 25,
+    "bandwidth_mbps": 600,
+    "reliability": 0.92,
+    "gpu_capacity_score": 0.7,
+    "free_vram_gb": 24
+  },
+  {
+    "id": "node-d",
+    "rtt_ms": 35,
+    "bandwidth_mbps": 400,
+    "reliability": 0.90,
+    "gpu_capacity_score": 0.6,
+    "free_vram_gb": 24
+  },
+  {
+    "id": "node-e",
+    "rtt_ms": 55,
+    "bandwidth_mbps": 300,
+    "reliability": 0.88,
+    "gpu_capacity_score": 0.5,
+    "free_vram_gb": 16
+  },
+  {
+    "id": "node-f",
+    "rtt_ms": 75,
+    "bandwidth_mbps": 200,
+    "reliability": 0.80,
+    "gpu_capacity_score": 0.4,
+    "free_vram_gb": 12
+  }
+]

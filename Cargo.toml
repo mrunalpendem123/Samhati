@@ -1,0 +1,12 @@
+[workspace]
+members = [
+  "crates/mesh-node",
+  "crates/proximity-router",
+  "crates/cluster-manager",
+  "crates/shard-store",
+  "crates/inference-coordinator",
+  "crates/model-config",
+  "crates/api",
+  "crates/bench",
+]
+resolver = "2"

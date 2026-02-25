@@ -1,0 +1,26 @@
+[
+  {
+    "name": "stablelm-3b-4e1t",
+    "config_path": "/Users/mrunalpendem/Desktop/new2/stablelm-3b-4e1t.json",
+    "params_b": 2.795,
+    "quant_bits": 4,
+    "kv_bits": 8,
+    "max_context": 4096
+  },
+  {
+    "name": "gpt40b",
+    "config_path": "/Users/mrunalpendem/Desktop/new2/sample-config.json",
+    "params_b": 40,
+    "quant_bits": 4,
+    "kv_bits": 8,
+    "max_context": 8192
+  },
+  {
+    "name": "gpt120b",
+    "config_path": "/Users/mrunalpendem/Desktop/new2/sample-config.json",
+    "params_b": 117,
+    "quant_bits": 4,
+    "kv_bits": 8,
+    "max_context": 8192
+  }
+]
