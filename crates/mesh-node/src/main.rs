@@ -1859,10 +1859,26 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
     #[cfg(not(feature = "burn"))]
     let _ = kv_ttl_secs;
 
+    // ── Gossip args (optional — enables swarm discoverability) ───────────────
+    let topic_hex    = get_arg(args, "--topic");
+    let bootstrap_ids = parse_bootstrap_ids(args)?;
+    let announce_secs: u64 = get_arg(args, "--interval")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+
     let endpoint = Endpoint::bind().await?;
-    let node_id = endpoint.id();
+    let node_id   = endpoint.id();
     println!("node_id:  {node_id}");
     println!("hint:     mesh-node dist-run --executor iroh --peers {node_id} ...");
+
+    // Build the gossip handler BEFORE the router builder consumes the endpoint.
+    // If no --topic is given this stays None and the serve node is reachable only
+    // via its NodeId (manually passed to --peers).
+    let gossip_opt = if topic_hex.is_some() {
+        Some(Gossip::builder().spawn(endpoint.clone()))
+    } else {
+        None
+    };
 
     // ── Real shard (burn feature only) ───────────────────────────────────────
     #[cfg(feature = "burn")]
@@ -1904,20 +1920,12 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
             .unwrap_or(4096);
 
         let shard_config = LlamaShardConfig {
-            layer_start,
-            layer_end,
-            total_layers,
-            num_attention_heads,
-            num_key_value_heads,
-            hidden_size,
-            intermediate_size,
-            vocab_size,
-            rope_theta,
-            rms_norm_eps,
-            max_seq_len,
+            layer_start, layer_end, total_layers,
+            num_attention_heads, num_key_value_heads,
+            hidden_size, intermediate_size, vocab_size,
+            rope_theta, rms_norm_eps, max_seq_len,
         };
 
-        // Support comma-separated list of safetensors shards
         let weight_files: Vec<String> = model_path
             .split(',')
             .map(|s| s.trim().to_string())
@@ -1927,24 +1935,86 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
         println!("shard loaded — serving on {node_id}");
 
         let server = InferenceServer::new(shard, kv_ttl);
-        let _router = Router::builder(endpoint)
-            .accept(INFERENCE_ALPN, server)
-            .spawn();
+        let mut rb = Router::builder(endpoint).accept(INFERENCE_ALPN, server);
+        if let Some(g) = &gossip_opt {
+            rb = rb.accept(iroh_gossip::ALPN, g.clone());
+        }
+        let _router = rb.spawn();
 
-        println!("press Ctrl-C to stop");
-        tokio::signal::ctrl_c().await.ok();
-        return Ok(());
+        return run_gossip_announce_loop(
+            args, node_id.to_string(), topic_hex, bootstrap_ids, gossip_opt, announce_secs,
+        ).await;
     }
 
     // ── Mock server (no weights / burn feature disabled) ─────────────────────
     let server = MockInferenceServer::new();
     println!("no --model-path provided — serving mock inference");
-    let _router = Router::builder(endpoint)
-        .accept(INFERENCE_ALPN, server)
-        .spawn();
+    let mut rb = Router::builder(endpoint).accept(INFERENCE_ALPN, server);
+    if let Some(g) = &gossip_opt {
+        rb = rb.accept(iroh_gossip::ALPN, g.clone());
+    }
+    let _router = rb.spawn();
 
+    run_gossip_announce_loop(
+        args, node_id.to_string(), topic_hex, bootstrap_ids, gossip_opt, announce_secs,
+    ).await
+}
+
+/// Joins a gossip topic (if `topic_hex` is Some) and broadcasts a `CapabilityPayload`
+/// every `interval_secs` seconds until Ctrl-C.
+///
+/// When no topic is provided the function just waits for Ctrl-C so `cmd_serve` has a
+/// single unified exit point.
+async fn run_gossip_announce_loop(
+    args: &[String],
+    node_id: String,
+    topic_hex: Option<String>,
+    bootstrap_ids: Vec<EndpointId>,
+    gossip_opt: Option<Gossip>,
+    interval_secs: u64,
+) -> Result<()> {
+    // No gossip — just wait for Ctrl-C.
+    let (topic_hex, gossip) = match (topic_hex, gossip_opt) {
+        (Some(th), Some(g)) => (th, g),
+        _ => {
+            println!("tip: pass --topic <64-hex> --bootstrap <id> to join gossip");
+            println!("     and be discoverable by --executor swarm");
+            println!("press Ctrl-C to stop");
+            tokio::signal::ctrl_c().await.ok();
+            return Ok(());
+        }
+    };
+
+    let topic = parse_topic_id(&topic_hex)?;
+    let (sender, _) = gossip.subscribe(topic, bootstrap_ids).await?.split();
+
+    // Build capability payload once (static for this process lifetime).
+    let (caps, _) = capability_from_args(args, node_id);
+    let init_msg = format!("cap:{}", serde_json::to_string(&caps)?);
+    if let Err(e) = sender.broadcast(init_msg.into_bytes().into()).await {
+        eprintln!("initial gossip broadcast error: {e}");
+    }
+    println!("announcing on gossip topic {topic_hex} every {interval_secs}s");
     println!("press Ctrl-C to stop");
-    tokio::signal::ctrl_c().await.ok();
+
+    // Use a pinned Ctrl-C future so a signal is never missed between ticks.
+    let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+    tick.tick().await; // skip the immediate first tick (already broadcast above)
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => break,
+            _ = tick.tick() => {
+                let m = format!("cap:{}", serde_json::to_string(&caps).unwrap_or_default());
+                if let Err(e) = sender.broadcast(m.into_bytes().into()).await {
+                    eprintln!("gossip broadcast error: {e}");
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
