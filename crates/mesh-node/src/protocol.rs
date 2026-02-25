@@ -66,47 +66,5 @@ pub fn parse_pong(body: &str) -> Option<PongMessage> {
     serde_json::from_str(body).ok()
 }
 
-pub const INFERENCE_ALPN: &[u8] = b"mesh-inference";
-pub type SessionId = String;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InferenceRequest {
-    pub session_id: SessionId,
-    pub layer_start: u32,
-    pub layer_end: u32,
-    pub max_tokens: u32,
-    pub temperature: f32,
-    #[serde(with = "serde_bytes")]
-    pub tensor_bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InferenceResponse {
-    #[serde(with = "serde_bytes")]
-    pub tensor_bytes: Vec<u8>,
-    pub error: Option<String>,
-}
-
-impl InferenceRequest {
-    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let bytes = bincode::serialize(self)?;
-        Ok(bytes)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        let req = bincode::deserialize(bytes)?;
-        Ok(req)
-    }
-}
-
-impl InferenceResponse {
-    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let bytes = bincode::serialize(self)?;
-        Ok(bytes)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        let res = bincode::deserialize(bytes)?;
-        Ok(res)
-    }
-}
+// RPC ALPN constant lives in inference-coordinator to avoid a circular dependency.
+pub use inference_coordinator::rpc::INFERENCE_ALPN;

@@ -1,11 +1,15 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+/// Assignment of a layer range to a specific peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardSpec {
     pub peer_id: String,
     pub layer_start: usize,
     pub layer_end: usize,
+    /// Total layers in the full model — lets each shard detect whether it is
+    /// the first (layer_start == 0) or last (layer_end == total_layers) shard.
+    pub total_layers: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +18,8 @@ pub struct ShardPlan {
     pub total_layers: usize,
     pub shards: Vec<ShardSpec>,
 }
+
+// ── Planner ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct RoundRobinPlanner {
@@ -42,7 +48,8 @@ impl RoundRobinPlanner {
 
         if total_layers < min_layers * peers {
             return Err(anyhow!(
-                "not enough layers ({total_layers}) for {peers} peers with min_layers_per_peer={min_layers}"
+                "not enough layers ({total_layers}) for {peers} peers \
+                 with min_layers_per_peer={min_layers}"
             ));
         }
 
@@ -62,6 +69,7 @@ impl RoundRobinPlanner {
                 peer_id: peer_id.clone(),
                 layer_start: start,
                 layer_end: end,
+                total_layers: Some(total_layers),
             });
         }
 

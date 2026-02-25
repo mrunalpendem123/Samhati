@@ -1,16 +1,20 @@
 use anyhow::{anyhow, Result};
 mod inference;
 mod protocol;
-mod state;
 mod scheduler;
+mod server;
+mod state;
 mod api;
 mod persist;
 use cluster_manager::ClusterConstraints;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointId};
 use iroh_gossip::{api::Event, Gossip, TopicId};
+use protocol::INFERENCE_ALPN;
+#[allow(unused_imports)]
+use server::{InferenceServer, MockInferenceServer};
 use inference::{infer_http, infer_local_exec, ChatMessage, LocalExecConfig};
-use inference_coordinator::{CandleShardRunner, CandleShardRunnerConfig, RoundRobinPlanner, ShardPlan, Coordinator, EchoExecutor, InferenceRequest};
+use inference_coordinator::{ModelShardRunner, ModelShardRunnerConfig, Coordinator, EchoExecutor, InferenceRequest, IrohDistributedExecutor, RoundRobinPlanner, ShardPlan};
 use api::{serve as serve_api, ApiConfig};
 use model_config::{estimate_required_vram_gb, estimate_weights_gb, EstimateInput, ModelConfig};
 use n0_future::StreamExt;
@@ -134,7 +138,10 @@ fn cmd_estimate(args: &[String]) {
 
     let params_b = get_arg(args, "--params-b")
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(117.0);
+        .unwrap_or_else(|| {
+            eprintln!("--params-b is required (model size in billions, e.g. 7.0, 13.0, 70.0)");
+            std::process::exit(2);
+        });
 
     let cfg = match ModelConfig::from_json_file(&config_path, params_b) {
         Ok(cfg) => cfg,
@@ -203,7 +210,7 @@ fn cmd_capacity(args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow!("--config or --models is required"))?;
         let params_b = get_arg(args, "--params-b")
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(117.0);
+            .ok_or_else(|| anyhow!("--params-b is required when using --config (model size in billions, e.g. 7.0)"))?;
         let cfg = ModelConfig::from_json_file(&config_path, params_b)?;
         (cfg, "custom".to_string())
     };
@@ -277,7 +284,7 @@ fn cmd_dist_plan(args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow!("--config or --models is required"))?;
         let params_b = get_arg(args, "--params-b")
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(117.0);
+            .ok_or_else(|| anyhow!("--params-b is required when using --config (model size in billions, e.g. 7.0)"))?;
         let cfg = ModelConfig::from_json_file(&config_path, params_b)?;
         let name = get_arg(args, "--model")
             .or_else(|| get_arg(args, "--model-name"))
@@ -324,7 +331,7 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow!("--config or --models is required"))?;
         let params_b = get_arg(args, "--params-b")
             .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(117.0);
+            .ok_or_else(|| anyhow!("--params-b is required when using --config (model size in billions, e.g. 7.0)"))?;
         let cfg = ModelConfig::from_json_file(&config_path, params_b)?;
         let name = get_arg(args, "--model")
             .or_else(|| get_arg(args, "--model-name"))
@@ -347,15 +354,15 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
     };
 
     let executor_name = get_arg(args, "--executor").unwrap_or_else(|| "echo".to_string());
-    if executor_name == "candle" {
+    if executor_name == "burn" {
         let model_path = get_arg(args, "--model-path");
-        let device = get_arg(args, "--candle-device").unwrap_or_else(|| "cpu".to_string());
-        let mode = get_arg(args, "--candle-mode").unwrap_or_else(|| "simulate".to_string());
-        let hidden = get_arg(args, "--candle-hidden")
+        let backend = get_arg(args, "--model-device").unwrap_or_else(|| "ndarray".to_string());
+        let mode = get_arg(args, "--model-mode").unwrap_or_else(|| "simulate".to_string());
+        let hidden = get_arg(args, "--model-hidden")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(8);
-        let tensor_name = get_arg(args, "--candle-tensor");
-        let sample_bytes = get_arg(args, "--candle-sample-bytes")
+        let tensor_name = get_arg(args, "--model-tensor");
+        let sample_bytes = get_arg(args, "--model-sample-bytes")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(256);
         let shard = plan
@@ -363,11 +370,11 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
             .get(0)
             .ok_or_else(|| anyhow!("plan has no shards"))?
             .clone();
-        let runner = CandleShardRunner::new(CandleShardRunnerConfig {
+        let runner = ModelShardRunner::new(ModelShardRunnerConfig {
             model_path,
             layer_start: shard.layer_start,
             layer_end: shard.layer_end,
-            device,
+            backend,
             mode,
             hidden,
             tensor_name,
@@ -385,6 +392,23 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if executor_name == "iroh" {
+        // Real distributed execution: open a QUIC stream to each peer for its assigned layers.
+        let endpoint = Endpoint::bind().await?;
+        let executor = IrohDistributedExecutor::new(endpoint);
+        let coordinator = Coordinator::new(plan, executor);
+        let result = coordinator.run(request).await?;
+        println!("output: {}", result.output);
+        for step in result.steps {
+            println!(
+                "step {} peer={} output={}",
+                step.shard_index, step.peer_id, step.output
+            );
+        }
+        return Ok(());
+    }
+
+    // Default: echo executor (no real inference, useful for testing plan/routing logic)
     let coordinator = Coordinator::new(plan, EchoExecutor::default());
     let result = coordinator.run(request).await?;
     println!("output: {}", result.output);
@@ -406,7 +430,10 @@ fn cmd_simulate(args: &[String]) {
 
     let params_b = get_arg(args, "--params-b")
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(117.0);
+        .unwrap_or_else(|| {
+            eprintln!("--params-b is required (model size in billions, e.g. 7.0, 13.0, 70.0)");
+            std::process::exit(2);
+        });
 
     let cfg = match ModelConfig::from_json_file(&config_path, params_b) {
         Ok(cfg) => cfg,
@@ -497,14 +524,13 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(10);
 
-    let config_path = get_arg(args, "--config");
-    let params_b = get_arg(args, "--params-b")
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(117.0);
-
     let mut model_options: Vec<ModelOption> = Vec::new();
     let mut local_models: Vec<ModelSummary> = Vec::new();
-    if let Some(path) = config_path {
+    if let Some(path) = get_arg(args, "--config") {
+        // --params-b is required when a --config is provided — no silent default.
+        let params_b = get_arg(args, "--params-b")
+            .and_then(|v| v.parse::<f64>().ok())
+            .ok_or_else(|| anyhow!("--params-b is required when --config is provided (model size in billions, e.g. 7.0)"))?;
         let model_cfg = ModelConfig::from_json_file(&path, params_b)?;
         let model_name = get_arg(args, "--model-name").unwrap_or_else(|| "primary".to_string());
         model_options.push(ModelOption {
@@ -581,8 +607,11 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
     let node_id = endpoint.id();
     let node_id_str = node_id.to_string();
     let gossip = Gossip::builder().spawn(endpoint.clone());
+    let inference_server = MockInferenceServer::new();
+
     let net_router = Router::builder(endpoint)
         .accept(iroh_gossip::ALPN, gossip.clone())
+        .accept(INFERENCE_ALPN, inference_server)
         .spawn();
 
     let topic_hex = hex::encode(topic.as_bytes());
@@ -1658,7 +1687,7 @@ fn print_usage() {
     println!("mesh-node estimate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--nodes 4] [--kv-bytes 1] [--overhead 1.15] [--runtime-overhead 0.15]");
     println!("mesh-node capacity --free-vram 8 [--max-nodes 8] [--current-nodes 2] [--seq 4096] [--quant 4] [--kv-bytes 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
     println!("mesh-node dist-plan --peers id1,id2 [--min-layers-per-peer 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
-    println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|candle --model-path /path/to/model.safetensors --candle-device cpu|metal --candle-mode simulate|mlp|weights|forward|embed --candle-hidden 8 --candle-tensor NAME --candle-sample-bytes 256]");
+    println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|burn|iroh --model-path /path/to/model.safetensors --model-device ndarray|wgpu --model-mode simulate|mlp|weights|forward|embed --model-hidden 8 --model-tensor NAME --model-sample-bytes 256]");
     println!("mesh-node simulate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--peers peers.json] [--rtt-samples rtt.json]");
     println!("mesh-node gossip --topic <64-hex> [--bootstrap <endpoint_id> ...] [--interval 10] [--rtt-probe] [--rtt-timeout-ms 3000] [--peer-ttl-ms 15000] [--peer-fail-threshold 3] [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000] [--load-penalty 0.05] [--load-decay 0.9] [--config config.json] [--params-b 117] [--model-name primary] [--models models.json] [--fallback-model name:/path/to/config.json:params_b] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--free-vram 48] [--reserve-gb 4] [--safety-factor 0.7] [--min-inference-gb 6] [--role inference|routing|cache] [--state-dir state] [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8] [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]");
     println!("mesh-node infer-http --api-base http://127.0.0.1:8000/v1 --model gpt-oss-20b --prompt \"Hello\" [--system \"You are ...\"] [--max-tokens 128] [--temperature 0.2] [--api-key sk-...]");

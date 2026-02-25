@@ -1,7 +1,8 @@
-# MVP Spec (gpt-oss-120b)
+# Distributed Mesh Spec (Model-Agnostic)
 
 ## Goals
-- Run gpt-oss-120b inference across heterogeneous nodes.
+- Run any supported LLM architecture (Llama, BLOOM, Falcon, Mixtral) across heterogeneous nodes.
+- Capable of scaling to massively large models (e.g. Llama-3.1 405B+).
 - Keep latency minimal using proximity-based routing.
 - Handle unknown GPU availability via adaptive cluster sizing.
 
