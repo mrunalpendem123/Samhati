@@ -2,18 +2,20 @@ use anyhow::Result;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{stream::BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-use crate::inference::{infer_http, infer_local_exec, ChatMessage, LocalExecConfig};
+use crate::inference::{infer_http, infer_http_stream, infer_local_exec, words_stream, ChatMessage, LocalExecConfig};
 
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
@@ -147,8 +149,8 @@ struct ChatChoice {
 async fn chat_completions(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
-    Json(_req): Json<ChatRequest>,
-) -> impl IntoResponse {
+    Json(req): Json<ChatRequest>,
+) -> axum::response::Response {
     if let Err(resp) = check_auth(&state, &headers).await {
         return resp;
     }
@@ -156,126 +158,176 @@ async fn chat_completions(
         return resp;
     }
     if state.infer_base.is_none() && state.local_exec.is_none() {
-        let body = json!({
-            "error": {
-                "message": "inference backend not configured (set --infer-base or --local-bin/--local-args/--local-model)",
-                "type": "not_configured",
-            }
-        });
-        return (StatusCode::NOT_IMPLEMENTED, Json(body)).into_response();
+        return api_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_configured",
+            "inference backend not configured (set --infer-base or --local-bin/--local-args/--local-model)",
+        );
     }
-
-    let mut req = _req;
     if req.messages.is_empty() {
-        let body = json!({
-            "error": {
-                "message": "messages must be non-empty",
-                "type": "invalid_request",
-            }
-        });
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    }
-    if req.stream.unwrap_or(false) {
-        let body = json!({
-            "error": {
-                "message": "streaming not supported yet",
-                "type": "not_supported",
-            }
-        });
-        return (StatusCode::NOT_IMPLEMENTED, Json(body)).into_response();
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request", "messages must be non-empty");
     }
 
-    let model = req.model.take().or_else(|| state.default_model.clone());
-    let model = match model {
+    let model = match req.model.or_else(|| state.default_model.clone()) {
         Some(m) => m,
-        None => {
-            let body = json!({
-                "error": {
-                    "message": "model is required",
-                    "type": "invalid_request",
-                }
-            });
-            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-        }
+        None => return api_error(StatusCode::BAD_REQUEST, "invalid_request", "model is required"),
     };
-
     if let Some(allow) = &state.allow_models {
         if !allow.contains(&model) {
-            let body = json!({
-                "error": {
-                    "message": "model not allowed",
-                    "type": "forbidden",
-                }
-            });
-            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+            return api_error(StatusCode::FORBIDDEN, "forbidden", "model not allowed");
         }
     }
 
     let messages = req
         .messages
         .into_iter()
-        .map(|m| ChatMessage {
-            role: m.role,
-            content: m.content,
-        })
+        .map(|m| ChatMessage { role: m.role, content: m.content })
         .collect::<Vec<_>>();
-
     let max_tokens = req.max_tokens.unwrap_or(128);
     let temperature = req.temperature.unwrap_or(0.2);
+    let completion_id = chrono_id();
+
+    // ── Streaming path ────────────────────────────────────────────────────────
+    if req.stream.unwrap_or(false) {
+        let content_stream: BoxStream<'static, String> =
+            if let Some(local) = state.local_exec.clone() {
+                match infer_local_exec(&local, messages, max_tokens, temperature).await {
+                    Ok(text) => Box::pin(words_stream(text)),
+                    Err(e) => {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "backend_error",
+                            &format!("local inference error: {e}"),
+                        );
+                    }
+                }
+            } else {
+                let infer_base = state.infer_base.clone().unwrap();
+                match infer_http_stream(
+                    &infer_base,
+                    state.infer_key.clone(),
+                    model.clone(),
+                    messages,
+                    max_tokens,
+                    temperature,
+                )
+                .await
+                {
+                    Ok(s) => Box::pin(s),
+                    Err(e) => {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "backend_error",
+                            &format!("inference error: {e}"),
+                        );
+                    }
+                }
+            };
+        return sse_response(completion_id, model, content_stream);
+    }
+
+    // ── Non-streaming path ────────────────────────────────────────────────────
     let content = if let Some(local) = state.local_exec.clone() {
         match infer_local_exec(&local, messages, max_tokens, temperature).await {
             Ok(c) => c,
             Err(e) => {
-                let body = json!({
-                    "error": {
-                        "message": format!("local inference error: {e}"),
-                        "type": "backend_error",
-                    }
-                });
-                return (StatusCode::BAD_GATEWAY, Json(body)).into_response();
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "backend_error",
+                    &format!("local inference error: {e}"),
+                );
             }
         }
     } else {
         let infer_base = state.infer_base.clone().unwrap();
-        let infer_key = state.infer_key.clone();
-        match infer_http(
-            &infer_base,
-            infer_key,
-            model.clone(),
-            messages,
-            max_tokens,
-            temperature,
-        )
-        .await
-        {
+        match infer_http(&infer_base, state.infer_key.clone(), model.clone(), messages, max_tokens, temperature).await {
             Ok(c) => c,
             Err(e) => {
-                let body = json!({
-                    "error": {
-                        "message": format!("inference error: {e}"),
-                        "type": "backend_error",
-                    }
-                });
-                return (StatusCode::BAD_GATEWAY, Json(body)).into_response();
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "backend_error",
+                    &format!("inference error: {e}"),
+                );
             }
         }
     };
 
     let response = ChatCompletionResponse {
-        id: format!("cmpl-{}", chrono_id()),
+        id: format!("cmpl-{completion_id}"),
         object: "chat.completion".to_string(),
         model,
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessageInput {
-                role: "assistant".to_string(),
-                content,
-            },
+            message: ChatMessageInput { role: "assistant".to_string(), content },
             finish_reason: "stop".to_string(),
         }],
     };
-
     Json(response).into_response()
+}
+
+/// Build a standard OpenAI-style error JSON response.
+fn api_error(status: StatusCode, error_type: &str, message: &str) -> axum::response::Response {
+    let body = json!({ "error": { "message": message, "type": error_type } });
+    (status, Json(body)).into_response()
+}
+
+/// Serialise one SSE chunk in OpenAI `chat.completion.chunk` format.
+/// Fields are omitted when `None` so the wire format matches upstream conventions:
+/// - role event: `delta: {"role": "assistant"}`
+/// - content event: `delta: {"content": "..."}`
+/// - stop event: `delta: {}`, `finish_reason: "stop"`
+fn make_chunk_event(
+    id: &str,
+    model: &str,
+    role: Option<&str>,
+    content: Option<&str>,
+    finish_reason: Option<&str>,
+) -> Event {
+    let mut delta = serde_json::Map::new();
+    if let Some(r) = role {
+        delta.insert("role".into(), json!(r));
+    }
+    if let Some(c) = content {
+        delta.insert("content".into(), json!(c));
+    }
+    let data = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{ "index": 0, "delta": delta, "finish_reason": finish_reason }],
+    });
+    Event::default().data(data.to_string())
+}
+
+/// Wraps a content-delta stream in an SSE response.
+///
+/// Emits: role announcement → content chunks → stop chunk → `[DONE]`.
+fn sse_response(
+    id: String,
+    model: String,
+    content_stream: BoxStream<'static, String>,
+) -> axum::response::Response {
+    // Build the three bookend events before moving id/model.
+    let role_event  = make_chunk_event(&id, &model, Some("assistant"), None, None);
+    let stop_event  = make_chunk_event(&id, &model, None, None, Some("stop"));
+
+    // Content events: one SSE chunk per delta string.
+    let content_events = content_stream.map(move |text| {
+        Ok::<Event, Infallible>(make_chunk_event(&id, &model, None, Some(&text), None))
+    });
+
+    let full_stream = futures_util::stream::once(async move {
+        Ok::<Event, Infallible>(role_event)
+    })
+    .chain(content_events)
+    .chain(futures_util::stream::once(async move {
+        Ok::<Event, Infallible>(stop_event)
+    }))
+    .chain(futures_util::stream::once(async {
+        Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+    }));
+
+    Sse::new(full_stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 fn chrono_id() -> String {

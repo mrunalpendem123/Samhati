@@ -4,10 +4,11 @@
 collaboratively across a peer-to-peer mesh network.  Each node contributes GPU/CPU memory and
 compute; together they host models that no single machine could fit alone.  A proximity-aware
 gossip protocol discovers peers, measures real network latency, and dynamically forms the
-smallest feasible cluster for each model request.
+optimal cluster for each model request — with mid-token failover if a peer drops.
 
-> **Status:** Active development — core networking, planning, and shard execution are working.
-> Real distributed tensor inference and production hardening are in progress.
+> **Status:** Active development — networking, shard planning, swarm routing, SSE streaming, and
+> simulated tensor inference are all working.  Full LlamaShard forward-pass validation against
+> real checkpoints is in progress.
 
 ---
 
@@ -32,9 +33,9 @@ smallest feasible cluster for each model request.
 │                        Samhati Node (mesh-node)                      │
 │                                                                      │
 │  ┌─────────────┐   ┌─────────────────┐   ┌────────────────────────┐ │
-│  │  Gossip /   │   │  Cluster        │   │  Inference             │ │
-│  │  Discovery  │──▶│  Manager        │──▶│  Coordinator           │ │
-│  │  (iroh)     │   │  (VRAM + RTT)   │   │  (shard planner)       │ │
+│  │  Gossip /   │   │  SwarmRegistry  │   │  Inference             │ │
+│  │  Discovery  │──▶│  (reputation +  │──▶│  Coordinator           │ │
+│  │  (iroh)     │   │   TTL eviction) │   │  (shard planner)       │ │
 │  └─────────────┘   └─────────────────┘   └────────┬───────────────┘ │
 │                                                    │                 │
 │  ┌─────────────┐   ┌─────────────────┐   ┌────────▼───────────────┐ │
@@ -44,6 +45,7 @@ smallest feasible cluster for each model request.
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  OpenAI-Compatible REST API  (GET /v1/models, POST /v1/chat) │   │
+│  │  Streaming SSE  ·  Auth  ·  Rate limiting                    │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
                   ▲                         ▲
@@ -51,86 +53,97 @@ smallest feasible cluster for each model request.
                   │                         │
            ┌──────┴──────┐           ┌──────┴──────┐
            │   Peer A    │           │   Peer B    │
-           │  layers 0-9 │           │ layers 10-19│
+           │  layers 0-15│           │ layers 16-31│
            └─────────────┘           └─────────────┘
 ```
 
-Inference is **pipeline-parallel**: the model's transformer layers are split across peers.
-Each peer runs its slice as an iroh QUIC server, passing activation tensors forward
-(and KV-cache backward) as size-prefixed bincode frames over a single bi-directional QUIC stream.
+Inference is **pipeline-parallel**: transformer layers are split across peers.  Each peer runs
+its slice as an iroh QUIC server, passing activation tensors forward as size-prefixed bincode
+frames.  The `SwarmRegistry` tracks EWMA reputation scores for every peer; if a peer drops
+mid-generation the `IrohDistributedExecutor` automatically retries with the next-best candidate.
 
 ---
 
 ## Feature Status
 
+### Infrastructure
+
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Gossip peer discovery** | ✅ Working | iroh-gossip, ping/pong RTT probing |
-| **Capability announcement** | ✅ Working | VRAM, bandwidth, GPU score, quant support |
-| **Proximity-aware cluster selection** | ✅ Working | RTT + VRAM + reliability scoring |
-| **VRAM / layer estimation** | ✅ Working | Any model config (hidden_size, layers, kv_heads) |
-| **Shard plan generation** | ✅ Working | Round-robin layer assignment |
-| **Shard store (content-addressed)** | ✅ Working | blake3, iroh-blobs compatible |
-| **OpenAI-compatible HTTP API** | ✅ Working | `/health`, `/v1/models`, `/v1/chat/completions` |
-| **API auth + rate limiting** | ✅ Working | Bearer token, per-IP RPS cap |
-| **Model registry (multi-model)** | ✅ Working | JSON registry, gossip broadcast |
-| **Simulated shard execution** | ✅ Working | `--executor burn --model-mode simulate` |
-| **Burn NdArray tensor ops** | ✅ Working | MLP, matmul, tanh, softmax |
-| **LlamaShard weight loading** | ✅ Working | Any safetensors checkpoint |
-| **KV cache (per-session)** | ✅ Working | Auto-eviction by TTL |
-| **Model-agnostic config** | ✅ Working | Any Llama-style architecture |
-| **State persistence** | ✅ Working | JSON state + peer/model DB |
-| **Model fallback cascade** | ✅ Working | Try smaller model if primary doesn't fit |
-| **WGPU GPU backend** | 🔧 Integrated | Compiles; thread-safety wrapper in place |
-| **Real distributed tensor pass** | 🚧 In Progress | QUIC streaming + activation hand-off |
-| **KV cache over wire** | 🚧 In Progress | Encode/decode across shard boundary |
-| **Grouped-query attention (GQA)** | 🚧 In Progress | GQA repeat_kv scaffolded |
-| **Speculative decoding** | 📋 Planned | Draft-verify across shards |
-| **Tensor parallelism (intra-layer)** | 📋 Planned | Column/row parallel linear |
-| **MoE expert placement** | 📋 Planned | Expert-parallel for Mixtral-style |
-| **8/4-bit weight quantization** | 📋 Planned | GGUF / bitsandbytes parity |
-| **Adaptive context reduction** | 📋 Planned | Degrade gracefully under pressure |
-| **Fault-tolerant rerouting** | 📋 Planned | Re-plan on peer drop mid-generation |
-| **iroh-blobs shard transfer** | 📋 Planned | P2P weight distribution |
-| **Streaming token output (SSE)** | 📋 Planned | HTTP chunked + server-sent events |
+| Gossip peer discovery | ✅ Working | iroh-gossip topics, ping/pong RTT probing |
+| Capability announcement | ✅ Working | VRAM, bandwidth, GPU score, layer ranges, uptime |
+| Layer-range advertisement | ✅ Working | `--layer-start/end/total-layers/model-name` flags |
+| Proximity-aware peer scoring | ✅ Working | Weighted: RTT 55%, reliability 20%, bandwidth 15%, GPU 10% |
+| SwarmRegistry (soft-state) | ✅ Working | TTL eviction, EWMA reputation α=0.15 |
+| Dynamic SwarmPlanner | ✅ Working | Per-range peer selection from live registry |
+| Static RoundRobinPlanner | ✅ Working | Even layer distribution across fixed peer list |
+| VRAM / layer estimation | ✅ Working | Any Llama-style config (hidden, layers, kv_heads) |
+| Cluster constraint solver | ✅ Working | VRAM + bandwidth + node-count constraints |
+| State persistence | ✅ Working | JSON peer DB + model registry |
+| Model fallback cascade | ✅ Working | Try smaller model if primary doesn't fit |
+
+### Inference Pipeline
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Echo executor (debug) | ✅ Working | Annotated pass-through for routing smoke tests |
+| Burn simulate mode | ✅ Working | Arithmetic token simulation, proves pipeline end-to-end |
+| Burn MLP mode | ✅ Working | Random-weight matmul + tanh, real NdArray tensor ops |
+| Burn weights/forward/embed | ✅ Working | Load real safetensors, compute against loaded weights |
+| Autoregressive `generate()` | ✅ Working | Byte tokenizer, prefill + decode loop, EOS detection |
+| Tensor frame wire format | ✅ Working | LE f32 bytes + shape + seq_offset, bincode serialized |
+| iroh QUIC RPC | ✅ Working | Size-prefixed bincode over QUIC streams |
+| Mid-token failover | ✅ Working | Reputation hit → next-best peer → retry up to N times |
+| `--executor swarm` | ✅ Working | Gossip discovery → SwarmPlanner → distributed pipeline |
+| KV cache (per-session) | ✅ Working | LayerKv chunks, TTL eviction, thread-safe |
+| LlamaShard weight loading | ✅ Working | safetensors → Burn Linear/RmsNorm via Record API |
+| LlamaShard full forward pass | ⚠️ Partial | Attention/MLP/RoPE compile; numerical correctness vs HF not yet validated |
+| WGPU GPU backend | ⚠️ Partial | Compiles; `LlamaShard::load_wgpu()` available; benchmarked |
+
+### API Layer
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `GET /health` | ✅ Working | |
+| `GET /v1/models` | ✅ Working | Lists allow-listed models |
+| `POST /v1/chat/completions` (non-stream) | ✅ Working | HTTP proxy or local-exec backend |
+| `POST /v1/chat/completions` (`stream: true`) | ✅ Working | SSE chunks in OpenAI format; true proxy for HTTP backend, word-stream for local-exec |
+| Bearer token + x-api-key auth | ✅ Working | |
+| Token-bucket rate limiting | ✅ Working | Configurable RPS + burst |
+| API → distributed pipeline | ❌ Not wired | `/v1/chat/completions` calls http/local-exec only; iroh/swarm executor path pending |
+
+### Weight Management
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Shard store (content-addressed) | ✅ Working | blake3 hash, add/get/find/evict/list |
+| Shard store used in inference | ❌ Disconnected | Library complete; inference pipeline fetches weights directly from disk paths |
+| iroh-blobs P2P weight transfer | 📋 Planned | |
 
 ---
 
 ## Comparison with Prior Art
 
-The table below compares Samhati against the reference class of decentralized collaborative
-inference systems.
-
-| Dimension | Samhati (this project) | Reference systems |
-|-----------|------------------------|-------------------|
+| Dimension | Samhati | Reference systems |
+|-----------|---------|-------------------|
 | **Implementation language** | Rust | Python |
 | **P2P transport** | iroh (QUIC, hole-punching) | libp2p / gRPC |
 | **Inference backend** | Burn 0.20 (NdArray + WGPU) | PyTorch / CUDA |
-| **Parallelism strategy** | Pipeline-parallel (per-layer shards) | Pipeline-parallel |
-| **Tensor parallelism** | 📋 Planned | ❌ Not supported |
-| **MoE / expert parallel** | 📋 Planned | ❌ Not supported |
-| **Model support** | Any safetensors (Llama, Mistral, Falcon…) | Specific model families |
+| **Peer discovery** | iroh-gossip DHT + ping/pong RTT | DHT |
+| **Cluster selection** | RTT + VRAM + reliability scoring | VRAM-only |
+| **Reputation system** | EWMA per-peer, updated on every RPC | Partial |
+| **Mid-token failover** | ✅ Automatic retry with next-best peer | ❌ |
+| **Streaming (SSE)** | ✅ True proxy or simulated word-stream | ✅ OpenAI-compatible |
+| **HTTP API auth + rate limiting** | ✅ Built-in | ❌ External |
 | **Multi-model registry** | ✅ JSON registry + gossip broadcast | ❌ Single model per network |
-| **Cluster selection** | ✅ RTT + VRAM + reliability scoring | Partially (VRAM-only) |
 | **KV cache** | ✅ Per-session, TTL eviction | ✅ Per-session |
 | **Quantization** | 📋 4/5/8-bit planned | ✅ 8-bit (bitsandbytes) |
+| **Tensor parallelism** | 📋 Planned | ❌ |
+| **MoE expert placement** | 📋 Planned | ❌ |
 | **Speculative decoding** | 📋 Planned | ❌ |
-| **Fault tolerance** | 📋 Re-planning on peer drop | Partial |
-| **Peer discovery** | ✅ iroh-gossip DHT + ping/pong RTT | ✅ DHT |
-| **HTTP API** | ✅ OpenAI-compatible | ✅ OpenAI-compatible |
-| **API auth + rate limiting** | ✅ Built-in | ❌ External |
 | **Memory estimation** | ✅ Weights + KV + runtime overhead | Partial |
-| **State persistence** | ✅ JSON (peer DB, model registry) | ✅ |
-| **Latency target** | ≤ 2 s first token (regional) | ~5–10 s observed |
-| **Throughput target** | ≥ 20 tok/s regional | ~6 tok/s observed |
 | **Production hardening** | 🚧 In progress | ✅ Battle-tested |
-
-**Key differentiators we are building toward:**
-- Full Rust stack — no GIL, lower memory overhead, better concurrency
-- WGPU backend — GPU inference on macOS/Linux/Windows without CUDA lock-in
-- Tensor + pipeline parallelism combined
-- MoE expert placement for Mixtral-class models
-- Sub-2-second first-token latency via proximity-aware routing
+| **Latency target** | ≤ 2 s first token (regional) | ~5–10 s observed |
 
 ---
 
@@ -139,13 +152,11 @@ inference systems.
 | Crate | Description |
 |-------|-------------|
 | `mesh-node` | Main binary — CLI, gossip node, API server, distributed inference driver |
-| `inference-coordinator` | Shard planner, coordinator, Burn-based LLM execution, KV cache, RPC wire format |
-| `proximity-router` | Peer scoring: RTT, bandwidth, reliability, GPU score → ranked peer list |
+| `inference-coordinator` | Shard planner, coordinator, Burn LLM execution, KV cache, RPC wire format, SwarmPlanner |
+| `proximity-router` | Peer scoring (RTT/bandwidth/reliability/GPU) + SwarmRegistry with EWMA reputation |
 | `cluster-manager` | Constraint solver: given peers and model, pick smallest feasible cluster |
 | `model-config` | Parse any safetensors config.json; estimate VRAM (weights + KV + runtime) |
 | `shard-store` | Content-addressed on-disk cache for weight shards (blake3 hashes) |
-| `api` | OpenAI-compatible HTTP layer (axum) |
-| `bench` | Benchmarking utilities |
 
 ---
 
@@ -179,18 +190,49 @@ cargo run -p mesh-node -- gossip \
 ```
 
 Both nodes exchange heartbeats and capability announcements. Add `--rtt-probe` on both to
-measure actual network latency between them.
+measure actual network latency.
+
+### Open-Mesh Swarm: Two Inference Nodes + Coordinator
+
+**Node A** — hosts layers 0–16 of `llama` model:
+```bash
+cargo run -p mesh-node -- gossip \
+  --topic <64-hex> \
+  --layer-start 0 --layer-end 16 --total-layers 32 --model-name llama \
+  --free-vram 24
+```
+
+**Node B** — hosts layers 16–32:
+```bash
+cargo run -p mesh-node -- gossip \
+  --topic <64-hex> \
+  --bootstrap <node_a_id> \
+  --layer-start 16 --layer-end 32 --total-layers 32 --model-name llama \
+  --free-vram 24
+```
+
+**Coordinator** — discovers both nodes and runs the full model:
+```bash
+cargo run -p mesh-node -- dist-run \
+  --executor swarm \
+  --topic <64-hex> \
+  --bootstrap <node_a_id> \
+  --discover-secs 5 \
+  --models models.json --model llama \
+  --layers-per-shard 16 \
+  --input "Hello, world"
+```
 
 ### Run Simulated Distributed Inference
 
 ```bash
-# Echo executor (no tensor ops — just routing smoke-test)
+# Echo executor (no tensor ops — routing smoke-test)
 cargo run -p mesh-node -- dist-run \
   --peers peer-a,peer-b \
   --config sample-config.json --params-b 7 \
   --input "Hello, world"
 
-# Burn simulate mode (adds layer indices as f32 — proves the shard pipeline)
+# Burn simulate mode (proves the full shard pipeline)
 cargo run -p mesh-node --features burn -- dist-run \
   --peers peer-a,peer-b \
   --config sample-config.json --params-b 7 \
@@ -205,15 +247,22 @@ cargo run -p mesh-node --features burn -- dist-run \
   --input "Hello, world"
 ```
 
-### Load Real Weights and Inspect a Tensor
+### Start the API Server
 
 ```bash
-cargo run -p mesh-node --features burn -- dist-run \
-  --peers peer-a \
-  --config sample-config.json --params-b 7 \
-  --executor burn --model-mode weights \
-  --model-path /path/to/model.safetensors \
-  --model-tensor "model.embed_tokens.weight"
+# Proxy to any OpenAI-compatible upstream with SSE streaming
+cargo run -p mesh-node -- api \
+  --bind 127.0.0.1:8000 \
+  --infer-base http://127.0.0.1:8001/v1 \
+  --default-model llama-3-8b \
+  --api-auth my-secret-key \
+  --rate-limit-rps 10
+
+# Test streaming
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer my-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama-3-8b","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
 ---
@@ -230,16 +279,23 @@ Announces capabilities, discovers peers, measures RTT, performs cluster selectio
 
 ```bash
 cargo run -p mesh-node -- gossip \
-  --topic <64-hex>                        # shared topic ID
-  [--bootstrap <endpoint_id> ...]         # seed peers
-  [--config <path>] [--params-b <f64>]   # model to serve
-  [--models <models.json>]               # multi-model registry
-  [--fallback-model name:path:params_b]  # fallback chain
-  [--free-vram <GB>]                     # override VRAM auto-detect
+  --topic <64-hex>                           # shared topic ID (required)
+  [--bootstrap <endpoint_id> ...]            # seed peers
+  [--config <path>] [--params-b <f64>]       # model to serve
+  [--models <models.json>]                   # multi-model registry
+  [--model-name <name>]                      # active model name
+  [--fallback-model name:path:params_b]      # fallback chain
+  # Layer-range advertisement (for --executor swarm):
+  [--layer-start <n>] [--layer-end <n>]      # layer range this node serves
+  [--total-layers <n>]                       # full model depth
+  # Hardware capabilities:
+  [--free-vram <GB>]                         # override VRAM auto-detect
   [--reserve-gb 4] [--safety-factor 0.7]
   [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8]
   [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]
+  # Cluster constraints:
   [--min-nodes 2] [--max-nodes 8] [--min-bw 500]
+  # Peer health:
   [--rtt-probe] [--rtt-timeout-ms 3000]
   [--peer-ttl-ms 15000] [--peer-fail-threshold 3]
   [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000]
@@ -247,6 +303,80 @@ cargo run -p mesh-node -- gossip \
   [--state-dir ./state]
   [--role inference|routing|cache]
   [--interval <secs>]
+```
+
+### `serve` — Start an iroh QUIC inference server
+
+Binds an iroh endpoint, optionally loads a real LlamaShard, and serves inference RPCs from
+other nodes.  Announces its NodeId on startup — pass that to `dist-run --peers`.
+
+```bash
+cargo run -p mesh-node --features burn -- serve \
+  --model-path /path/to/model.safetensors \
+  --layer-start 0 --layer-end 16 --total-layers 32 \
+  --hidden 4096 --intermediate 11008 --vocab 32000 \
+  --heads 32 --kv-heads 8 --rope-theta 500000 \
+  [--kv-ttl-secs 300]
+```
+
+Without `--model-path` the node runs a `MockInferenceServer` (echo with metadata).
+
+### `dist-run` — Execute a distributed inference pass
+
+```bash
+cargo run -p mesh-node [--features burn] -- dist-run \
+  --peers peer-a,peer-b \
+  [--models <path> --model <name>] \
+  [--config <path> --params-b <f64>] \
+  [--input "prompt text"] \
+  [--max-tokens 64] [--temperature 0.7] \
+  [--executor echo|burn|iroh|swarm] \
+  [--max-retries 2]
+```
+
+**Executor modes:**
+
+| `--executor` | Description |
+|---|---|
+| `echo` | No-op: returns the input annotated with shard info |
+| `burn` | Local Burn NdArray simulation (requires `--features burn`) |
+| `iroh` | Real distributed pass over iroh QUIC to `--peers` |
+| `swarm` | Discovers peers via gossip, uses SwarmPlanner for dynamic routing |
+
+**`burn` executor — `--model-mode` options:**
+
+| Mode | What it does |
+|---|---|
+| `simulate` | Adds layer index to a scalar — proves pipeline end-to-end |
+| `mlp` | Random-weight MLP: matmul + tanh over input bytes |
+| `weights` | Loads a named tensor from safetensors, reports shape + checksum |
+| `forward` | Matrix-vector multiply with a loaded weight tensor |
+| `embed` | Embedding lookup: maps input bytes to token IDs, sums rows |
+
+**`iroh` executor extra flags:**
+
+```bash
+--max-retries 2          # failover attempts on peer error
+```
+
+**`swarm` executor extra flags:**
+
+```bash
+--topic <64-hex>         # gossip topic to join
+--bootstrap <id>         # at least one known peer
+--discover-secs 5        # how long to collect announcements before planning
+--layers-per-shard 16    # target layers per shard slice
+--max-retries 2          # failover attempts on peer error
+```
+
+### `dist-plan` — Print a layer shard plan
+
+```bash
+cargo run -p mesh-node -- dist-plan \
+  --peers peer-a,peer-b,peer-c \
+  [--models <path> --model <name>] \
+  [--config <path> --params-b <f64>] \
+  [--min-layers-per-peer 1]
 ```
 
 ### `estimate` — Estimate VRAM requirements
@@ -268,51 +398,33 @@ cargo run -p mesh-node -- capacity \
   [--max-nodes 8] [--seq 4096] [--quant 4] [--kv-bytes 1]
 ```
 
-### `dist-plan` — Generate a layer shard plan
+### `api` — Start the OpenAI-compatible REST API server
 
 ```bash
-cargo run -p mesh-node -- dist-plan \
-  --peers peer-a,peer-b,peer-c \
-  [--models <path> --model <name>] \
-  [--config <path> --params-b <f64>] \
-  [--min-layers-per-peer 1]
+cargo run -p mesh-node -- api \
+  --bind 127.0.0.1:8000 \
+  [--infer-base http://upstream/v1]   # proxy backend
+  [--infer-key sk-...]
+  [--default-model <name>]
+  [--local-bin /path/to/llama-cli \   # local-exec backend
+   --local-args "-m {model} -p {prompt} -n {max_tokens} --temp {temperature}" \
+   --local-model /path/to/model.gguf]
+  [--api-auth <secret-key>]
+  [--allow-model <name>]              # whitelist (repeatable)
+  [--rate-limit-rps 5] [--rate-limit-burst 10]
 ```
 
-### `dist-run` — Execute a distributed inference pass
+**Endpoints:**
 
-```bash
-cargo run -p mesh-node [--features burn] -- dist-run \
-  --peers peer-a,peer-b \
-  [--models <path> --model <name>] \
-  [--config <path> --params-b <f64>] \
-  [--input "prompt text"] \
-  [--max-tokens 64] [--temperature 0.7] \
-  [--executor echo|burn|iroh] \
-  [--model-path /path/to/weights.safetensors] \
-  [--model-device ndarray|wgpu] \
-  [--model-mode simulate|mlp|weights|forward|embed] \
-  [--model-hidden 64] \
-  [--model-tensor "model.embed_tokens.weight"] \
-  [--model-sample-bytes 256]
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Node health check |
+| `GET` | `/v1/models` | List allow-listed models |
+| `POST` | `/v1/chat/completions` | Chat inference — supports `"stream": true` (SSE) |
 
-**Executor modes:**
-
-| `--executor` | Description |
-|---|---|
-| `echo` | No-op: returns the input annotated with shard info |
-| `burn` | Local Burn NdArray simulation (requires `--features burn`) |
-| `iroh` | Real distributed pass over iroh QUIC |
-
-**`--model-mode` options (burn executor):**
-
-| Mode | What it does |
-|---|---|
-| `simulate` | Adds layer index to a scalar — proves the shard pipeline end-to-end |
-| `mlp` | Random-weight MLP: matmul + tanh over the input bytes |
-| `weights` | Loads a named tensor from safetensors, reports shape + checksum |
-| `forward` | Matrix-vector multiply with a loaded weight tensor |
-| `embed` | Embedding lookup: maps input bytes to token IDs, sums embedding rows |
+**SSE streaming** — when `"stream": true`:
+- **HTTP proxy backend**: content deltas are forwarded token-by-token from upstream as they arrive
+- **Local-exec backend**: full response is simulated word-by-word as SSE chunks
 
 ### `simulate` — Cluster selection simulation
 
@@ -323,21 +435,19 @@ cargo run -p mesh-node -- simulate \
   [--min-nodes 2] [--max-nodes 6] [--min-bw 500]
 ```
 
-### `infer-http` — Query an OpenAI-compatible server
+### `infer-http` — Query an OpenAI-compatible endpoint directly
 
 ```bash
 cargo run -p mesh-node -- infer-http \
   --api-base http://127.0.0.1:8000/v1 \
-  --model <model-name> \
-  --prompt "Your prompt here" \
+  --model <name> --prompt "Your prompt" \
   [--system "System message"] \
   [--max-tokens 128] [--temperature 0.7] [--api-key sk-...]
 ```
 
-### `infer-local` — Run a local inference engine binary
+### `infer-local` — Run a local inference binary
 
-Supports any CLI tool that accepts a prompt via arguments.  Template variables:
-`{model}`, `{prompt}`, `{max_tokens}`, `{temperature}`, `{context}`.
+Template variables: `{model}`, `{prompt}`, `{max_tokens}`, `{temperature}`, `{context}`.
 
 ```bash
 cargo run -p mesh-node -- infer-local \
@@ -347,42 +457,19 @@ cargo run -p mesh-node -- infer-local \
   --prompt "Hello"
 ```
 
-### `api` — Start the OpenAI-compatible REST API server
-
-```bash
-cargo run -p mesh-node -- api \
-  --bind 127.0.0.1:8000 \
-  [--infer-base http://127.0.0.1:8001/v1] \
-  [--default-model <name>] \
-  [--local-bin /path/to/llama-cli \
-   --local-args "..." \
-   --local-model /path/to/model.gguf] \
-  [--api-auth <secret-key>] \
-  [--allow-model <name>] \
-  [--rate-limit-rps 5] [--rate-limit-burst 10]
-```
-
-**Endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Node health check |
-| `GET` | `/v1/models` | List available models |
-| `POST` | `/v1/chat/completions` | Chat inference (proxied or local) |
-
 ---
 
 ## Cargo Features
 
 | Feature | Description |
 |---------|-------------|
-| *(none)* | Base build: networking, planning, echo executor, API server |
-| `burn` | Enables Burn 0.20 (NdArray + WGPU backends), `LlamaShard`, `KvCacheStore`, real tensor ops |
+| *(none)* | Base build: networking, planning, echo executor, API server, SSE streaming |
+| `burn` | Enables Burn 0.20 (NdArray + WGPU), `LlamaShard`, `KvCacheStore`, real tensor ops |
 
 ```bash
 cargo build                    # no ML deps
-cargo build --features burn    # full Burn stack (safetensors weight loading, NdArray, WGPU)
-cargo test                     # run all tests
+cargo build --features burn    # full Burn stack
+cargo test                     # run all unit tests (11 tests)
 cargo test --features burn     # run tests with Burn backend
 ```
 
@@ -392,7 +479,7 @@ cargo test --features burn     # run tests with Burn backend
 
 ### Model config (`config.json`)
 
-Any Llama-style architecture.  Standard HuggingFace `config.json` fields are supported:
+Standard HuggingFace `config.json` format — any Llama-style architecture:
 
 ```json
 {
@@ -433,14 +520,14 @@ Pass it with `--config config.json --params-b 7` (7 = billions of parameters).
 
 Use with `--models models.json --model llama-3-8b`.
 
-### Gossip with cluster selection + fallback
+### Gossip node with layer advertisement
 
 ```bash
 cargo run -p mesh-node -- gossip \
   --topic <64-hex> \
   --models models.json \
   --model-name llama-3-8b \
-  --fallback-model mistral-7b:configs/mistral-7b.json:7 \
+  --layer-start 0 --layer-end 16 --total-layers 32 \
   --free-vram 24 \
   --min-nodes 2 --max-nodes 8 \
   --rtt-probe \
@@ -451,25 +538,40 @@ cargo run -p mesh-node -- gossip \
 
 ## Roadmap
 
-### Phase 1 — Foundation ✅ (complete)
+### Phase 1 — Foundation ✅
+
 - [x] iroh QUIC transport + gossip peer discovery
 - [x] Capability announcement (VRAM, RTT, bandwidth, GPU score)
 - [x] Proximity-aware cluster selection
 - [x] VRAM estimation for any model config
 - [x] Round-robin shard planner
-- [x] Content-addressed shard store
+- [x] Content-addressed shard store (blake3)
 - [x] OpenAI-compatible HTTP API with auth and rate limiting
 - [x] State persistence
 - [x] Burn 0.20 integration (NdArray + WGPU, model-agnostic)
 
-### Phase 2 — Real Distributed Inference 🚧 (in progress)
-- [ ] Full pipeline: activation tensors over QUIC between peers
-- [ ] KV cache synchronization across shard boundaries
-- [ ] LlamaShard end-to-end with real checkpoints (Llama-3, Mistral)
-- [ ] Streaming token output (SSE)
-- [ ] Fault-tolerant re-planning on peer drop
+### Phase 2 — Open-Mesh Swarm ✅
 
-### Phase 3 — Performance & Scale 📋 (planned)
+- [x] SwarmRegistry: soft-state peer store with TTL eviction + EWMA reputation
+- [x] Dynamic SwarmPlanner: per-range peer selection from live registry
+- [x] Layer-range advertisement in gossip (`--layer-start/end/total-layers/model-name`)
+- [x] `--executor swarm` with full gossip discovery → plan → execute flow
+- [x] Mid-token failover: reputation hit → retry with next-best peer
+- [x] `serve` command: iroh QUIC server with optional LlamaShard weight loading
+- [x] Autoregressive `generate()` pipeline (prefill + decode loop)
+- [x] SSE streaming (`stream: true`) — true proxy for HTTP backend, simulated for local-exec
+
+### Phase 3 — LlamaShard Validation 🚧
+
+- [ ] End-to-end numerical correctness vs HuggingFace on Llama-3 / Mistral
+- [ ] GQA `repeat_kv` in attention forward pass
+- [ ] RoPE rotate-half integration test
+- [ ] KV cache handoff across shard boundaries over the wire
+- [ ] API → distributed tensor pipeline (`/v1/chat/completions` via iroh/swarm executor)
+- [ ] ShardStore integration into inference pipeline (P2P weight fetch via blake3 hash)
+
+### Phase 4 — Performance & Scale 📋
+
 - [ ] 4/5/8-bit quantized weight loading (GGUF + safetensors)
 - [ ] Tensor parallelism (column/row parallel linear layers)
 - [ ] Speculative decoding across shards
@@ -478,10 +580,11 @@ cargo run -p mesh-node -- gossip \
 - [ ] Adaptive context reduction under memory pressure
 - [ ] Continuous batching
 
-### Phase 4 — Production 📋 (planned)
-- [ ] Reputation system (peer reliability scoring over time)
+### Phase 5 — Production 📋
+
+- [ ] Reputation persistence across restarts
 - [ ] Encrypted inference (homomorphic / TEE investigation)
-- [ ] Web dashboard (peer topology, cluster health)
+- [ ] Web dashboard (peer topology, cluster health, reputation heatmap)
 - [ ] Docker / container deployment
 - [ ] Incentive layer (optional token-gated access)
 
@@ -492,32 +595,36 @@ cargo run -p mesh-node -- gossip \
 ```
 Samhati/
 ├── crates/
-│   ├── mesh-node/              # Main binary (CLI + server)
+│   ├── mesh-node/                  # Main binary (CLI + server)
 │   │   └── src/
-│   │       ├── main.rs         # All CLI commands
-│   │       ├── server.rs       # iroh QUIC inference server
-│   │       ├── protocol.rs     # Gossip message types
-│   │       ├── scheduler.rs    # Cluster candidate scoring
-│   │       └── state.rs        # Peer / session state
-│   ├── inference-coordinator/  # Shard planning + tensor execution
+│   │       ├── main.rs             # All CLI commands
+│   │       ├── server.rs           # iroh QUIC inference server (real + mock)
+│   │       ├── protocol.rs         # Gossip message types + CapabilityPayload
+│   │       ├── api.rs              # OpenAI REST API (SSE streaming, auth, rate limit)
+│   │       ├── inference.rs        # HTTP proxy + local-exec backends + SSE stream helpers
+│   │       ├── scheduler.rs        # Cluster candidate scoring
+│   │       ├── state.rs            # Peer / session state
+│   │       └── persist.rs          # JSON state persistence
+│   ├── inference-coordinator/      # Shard planning + tensor execution
 │   │   └── src/
-│   │       ├── coordinator.rs  # Orchestrates multi-shard pass
-│   │       ├── model_runner.rs # ModelShardRunner (Burn NdArray modes)
-│   │       ├── llm_shard.rs    # LlamaShard<B> (real weight loading)
-│   │       ├── kv_cache.rs     # KvCacheStore<B> (per-session KV)
-│   │       ├── tensor_frame.rs # Wire format for activation tensors
-│   │       ├── iroh_executor.rs# QUIC-based distributed executor
-│   │       ├── plan.rs         # RoundRobinPlanner + ShardPlan
-│   │       └── rpc.rs          # RPC request/response types
-│   ├── proximity-router/       # Peer scoring and ranking
-│   ├── cluster-manager/        # VRAM-aware cluster constraint solver
-│   ├── model-config/           # Config parsing + VRAM estimation
-│   ├── shard-store/            # Content-addressed weight shard cache
-│   ├── api/                    # OpenAI-compatible HTTP layer
-│   └── bench/                  # Benchmarks
-├── sample-config.json          # Example model config
-├── sample-peers.json           # Example peer list
-└── MVP_SPEC.md                 # Architecture spec
+│   │       ├── coordinator.rs      # Orchestrates multi-shard pass; generate() loop
+│   │       ├── model_runner.rs     # ModelShardRunner (5 Burn simulation modes)
+│   │       ├── llm_shard.rs        # LlamaShard<B> (real weight loading + forward)
+│   │       ├── kv_cache.rs         # KvCacheStore<B> (per-session KV, TTL eviction)
+│   │       ├── tensor_frame.rs     # Wire format for activation tensors
+│   │       ├── iroh_executor.rs    # QUIC-based executor with mid-token failover
+│   │       ├── swarm_planner.rs    # SwarmPlanner (dynamic peer selection)
+│   │       ├── plan.rs             # RoundRobinPlanner + ShardPlan
+│   │       └── rpc.rs              # RPC request/response types
+│   ├── proximity-router/           # Peer scoring and ranking
+│   │   └── src/
+│   │       ├── lib.rs              # ProximityRouter, scoring weights, rank_peers()
+│   │       └── swarm.rs            # SwarmRegistry, SwarmPeer, LayerRange, reputation
+│   ├── cluster-manager/            # VRAM-aware cluster constraint solver
+│   ├── model-config/               # Config parsing + VRAM estimation
+│   └── shard-store/                # Content-addressed weight shard cache
+├── sample-config.json              # Example model config
+└── sample-peers.json               # Example peer list
 ```
 
 ---
@@ -525,12 +632,12 @@ Samhati/
 ## Contributing
 
 1. Fork and clone the repo
-2. `cargo build` — must compile clean with zero errors
+2. `cargo build` — must compile clean
 3. `cargo build --features burn` — must also compile clean
-4. `cargo test` — all tests must pass
+4. `cargo test` — all 11 tests must pass
 5. Open a PR with a clear description of the change
 
-Please keep PRs focused.  One feature or fix per PR.
+Please keep PRs focused — one feature or fix per PR.
 
 ---
 

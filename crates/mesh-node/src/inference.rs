@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -101,6 +102,81 @@ pub async fn infer_local_exec(
     }
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(text.trim().to_string())
+}
+
+/// Streams content delta strings from an OpenAI-compatible SSE upstream.
+///
+/// Makes a request with `stream: true`, then parses `data: {...}` lines from
+/// the response body and emits the `choices[0].delta.content` strings as they arrive.
+/// Returns `Err` if the HTTP request itself fails; per-line parse errors are silently skipped.
+pub async fn infer_http_stream(
+    api_base: &str,
+    api_key: Option<String>,
+    model: String,
+    messages: Vec<ChatMessage>,
+    max_tokens: u32,
+    temperature: f32,
+) -> Result<impl Stream<Item = String> + Send + 'static> {
+    let request = ChatRequest { model, messages, max_tokens, temperature, stream: true };
+    let url = format!("{api_base}/chat/completions");
+    let client = reqwest::Client::new();
+    let mut req = client.post(url).json(&request);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("http {status}: {body}"));
+    }
+
+    // Accumulate raw bytes into complete newline-terminated lines, then parse each
+    // `data: <json>` SSE event and emit only non-empty content deltas.
+    let mut buf = String::new();
+    let stream = resp
+        .bytes_stream()
+        .flat_map(move |chunk| {
+            let text = chunk
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            buf.push_str(&text);
+            let mut lines = Vec::new();
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim_end_matches('\r').to_owned();
+                buf.drain(..=pos);
+                lines.push(line);
+            }
+            futures_util::stream::iter(lines)
+        })
+        .filter_map(|line| async move {
+            let data = line.trim().strip_prefix("data: ")?.to_owned();
+            if data == "[DONE]" {
+                return None;
+            }
+            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+            let content = v["choices"][0]["delta"]["content"].as_str()?.to_owned();
+            if content.is_empty() { None } else { Some(content) }
+        });
+
+    Ok(stream)
+}
+
+/// Breaks a complete string into a word-at-a-time stream for simulated SSE.
+/// Each word is prefixed with a space except the first, matching how tokens arrive
+/// from real streaming backends.
+pub fn words_stream(text: String) -> impl Stream<Item = String> + Send + 'static {
+    let mut words: Vec<String> = Vec::new();
+    let mut first = true;
+    for word in text.split_whitespace() {
+        words.push(if first {
+            first = false;
+            word.to_owned()
+        } else {
+            format!(" {word}")
+        });
+    }
+    futures_util::stream::iter(words)
 }
 
 fn build_prompt(messages: &[ChatMessage]) -> String {

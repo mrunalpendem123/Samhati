@@ -33,7 +33,7 @@ use std::fs;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 use state::{PeerState, PendingPing};
 use sysinfo::System;
@@ -1710,6 +1710,13 @@ fn load_rtt_samples(path: &str) -> Result<HashMap<PeerId, f64>, String> {
         .collect())
 }
 
+/// Process start time — initialised on first call, used for uptime reporting.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+fn process_uptime_secs() -> u64 {
+    PROCESS_START.get_or_init(Instant::now).elapsed().as_secs()
+}
+
 fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload, Option<f64>) {
     let reserve_gb = get_arg(args, "--reserve-gb")
         .and_then(|v| v.parse::<f64>().ok())
@@ -1763,6 +1770,24 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
             }
         });
 
+    // Build the hosted-layer-range list from optional CLI args.
+    // Operators pass: --layer-start N --layer-end M [--total-layers T] [--model-name NAME]
+    let layers_hosted = match (
+        get_arg(args, "--layer-start").and_then(|v| v.parse::<usize>().ok()),
+        get_arg(args, "--layer-end").and_then(|v| v.parse::<usize>().ok()),
+    ) {
+        (Some(ls), Some(le)) => {
+            let total = get_arg(args, "--total-layers")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(le);
+            let model = get_arg(args, "--model-name")
+                .or_else(|| get_arg(args, "--model"))
+                .unwrap_or_else(|| "default".to_string());
+            vec![HostedLayerRange { model, layer_start: ls, layer_end: le, total_layers: total }]
+        }
+        _ => Vec::new(),
+    };
+
     let payload = CapabilityPayload {
         node_id,
         free_vram_gb,
@@ -1774,9 +1799,9 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
         context,
         quant_bits,
         role,
-        layers_hosted: Vec::new(),
+        layers_hosted,
         load_score: 0.0,
-        uptime_secs: 0,
+        uptime_secs: process_uptime_secs(),
     };
     (payload, available_gb)
 }
