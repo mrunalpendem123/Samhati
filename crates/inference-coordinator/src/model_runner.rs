@@ -2,6 +2,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use crate::plan::ShardSpec;
+#[cfg(feature = "burn")]
+use crate::tensor_frame::TensorFrame;
 use crate::{InferenceRequest, ShardExecutor};
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,18 @@ impl ShardExecutor for ModelShardRunner {
             shard.layer_start,
             shard.layer_end
         ))
+    }
+
+    /// Tensor-native path: called by `Coordinator::generate()`.
+    /// Returns a [1,1] frame carrying the next token ID.
+    #[cfg(feature = "burn")]
+    async fn run_shard_tensor(
+        &self,
+        shard: &ShardSpec,
+        frame: TensorFrame,
+        _request: &InferenceRequest,
+    ) -> Result<TensorFrame> {
+        run_tensor_shard(&self.config, shard, frame)
     }
 }
 
@@ -354,5 +368,88 @@ fn run_simulated(
         other => Err(anyhow!(
             "unknown mode '{other}' (expected simulate, mlp, weights, forward, or embed)"
         )),
+    }
+}
+
+// ── Tensor-native forward pass (used by Coordinator::generate) ───────────────
+//
+// Returns a [1, 1] TensorFrame with a single token ID (the next predicted
+// token).  This is intentionally a simple simulation — real autoregressive
+// output comes from `LlamaShard::forward()` via InferenceServer on a real peer.
+
+#[cfg(feature = "burn")]
+fn run_tensor_shard(
+    config: &ModelShardRunnerConfig,
+    shard: &ShardSpec,
+    frame: TensorFrame,
+) -> Result<TensorFrame> {
+    use burn::backend::ndarray::NdArrayDevice;
+    use burn::backend::NdArray;
+    use burn::tensor::{activation, Tensor, TensorData};
+
+    let device = NdArrayDevice::Cpu;
+    let f32s = frame.to_f32_vec()?;
+    let seq_offset = frame.seq_offset + f32s.len();
+
+    match config.mode.as_str() {
+        "simulate" => {
+            let mean = if f32s.is_empty() {
+                0.0f32
+            } else {
+                f32s.iter().sum::<f32>() / f32s.len() as f32
+            };
+            let mut x = Tensor::<NdArray, 1>::from_data(
+                TensorData::new(vec![mean], [1usize]),
+                &device,
+            );
+            for layer in shard.layer_start..shard.layer_end {
+                let delta = Tensor::<NdArray, 1>::from_data(
+                    TensorData::new(vec![layer as f32 * 0.1], [1usize]),
+                    &device,
+                );
+                x = x.add(delta);
+            }
+            let val: Vec<f32> = x.into_data().to_vec().unwrap_or_default();
+            let val = val.first().copied().unwrap_or(0.0);
+            // Map to printable ASCII 32-126; never emit 0 (EOS sentinel)
+            let token_id = 32u8 + (val.abs() as u64 % 95) as u8;
+            Ok(TensorFrame::from_f32(&[token_id as f32], vec![1, 1], seq_offset))
+        }
+        "mlp" => {
+            let hidden = config.hidden.max(1);
+            let mut features = vec![0.0f32; hidden];
+            for (i, &v) in f32s.iter().enumerate() {
+                features[i % hidden] += v;
+            }
+            let mut x = Tensor::<NdArray, 2>::from_data(
+                TensorData::new(features, [1usize, hidden]),
+                &device,
+            );
+            let mut weights = vec![0.0f32; hidden * hidden];
+            for i in 0..hidden {
+                for j in 0..hidden {
+                    let idx = i * hidden + j;
+                    weights[idx] = (idx as f32 + 1.0) / (hidden * hidden) as f32;
+                }
+            }
+            let w = Tensor::<NdArray, 2>::from_data(
+                TensorData::new(weights, [hidden, hidden]),
+                &device,
+            );
+            for _ in shard.layer_start..shard.layer_end {
+                x = activation::tanh(x.matmul(w.clone()));
+            }
+            let vals: Vec<f32> = x.into_data().to_vec().unwrap_or_default();
+            let val = vals.first().copied().unwrap_or(0.0);
+            let token_id = 32u8 + ((val.abs() * 94.0) as u64 % 95) as u8;
+            Ok(TensorFrame::from_f32(&[token_id as f32], vec![1, 1], seq_offset))
+        }
+        _ => {
+            // weights / forward / embed: no sensible per-token tensor path;
+            // pass through a non-EOS token derived from the input sum.
+            let sum: f32 = f32s.iter().sum();
+            let token_id = 1u8.max((sum.abs() as u64 % 95 + 32) as u8);
+            Ok(TensorFrame::from_f32(&[token_id as f32], vec![1, 1], seq_offset))
+        }
     }
 }

@@ -698,3 +698,17 @@ impl<B: Backend> LlamaShard<B> {
         }
     }
 }
+
+// ── Convenience constructors for the default WGPU device ─────────────────────
+
+impl LlamaShard<crate::InferenceBackend> {
+    /// Load from one or more safetensors files using the best available WGPU
+    /// device.  This is the primary entry point for production use.
+    pub fn load_wgpu(
+        weight_files: &[impl AsRef<Path>],
+        cfg: LlamaShardConfig,
+    ) -> Result<Self> {
+        use burn::backend::wgpu::WgpuDevice;
+        Self::load(weight_files, cfg, WgpuDevice::BestAvailable)
+    }
+}

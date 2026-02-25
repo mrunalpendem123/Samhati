@@ -6,7 +6,5 @@ members = [
   "crates/shard-store",
   "crates/inference-coordinator",
   "crates/model-config",
-  "crates/api",
-  "crates/bench",
 ]
 resolver = "2"

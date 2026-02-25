@@ -107,6 +107,12 @@ async fn main() {
                 std::process::exit(2);
             }
         }
+        "serve" => {
+            if let Err(e) = cmd_serve(&args[2..]).await {
+                eprintln!("serve error: {e}");
+                std::process::exit(2);
+            }
+        }
         "infer-http" => {
             if let Err(e) = cmd_infer_http(&args[2..]).await {
                 eprintln!("infer-http error: {e}");
@@ -381,30 +387,18 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
             sample_bytes,
         });
         let coordinator = Coordinator::new(plan, runner);
-        let result = coordinator.run(request).await?;
-        println!("output: {}", result.output);
-        for step in result.steps {
-            println!(
-                "step {} peer={} output={}",
-                step.shard_index, step.peer_id, step.output
-            );
-        }
+        let output = coordinator.generate(request).await?;
+        println!("output: {output}");
         return Ok(());
     }
 
     if executor_name == "iroh" {
-        // Real distributed execution: open a QUIC stream to each peer for its assigned layers.
+        // Real distributed execution via tensor pipeline: opens QUIC streams to each peer.
         let endpoint = Endpoint::bind().await?;
         let executor = IrohDistributedExecutor::new(endpoint);
         let coordinator = Coordinator::new(plan, executor);
-        let result = coordinator.run(request).await?;
-        println!("output: {}", result.output);
-        for step in result.steps {
-            println!(
-                "step {} peer={} output={}",
-                step.shard_index, step.peer_id, step.output
-            );
-        }
+        let output = coordinator.generate(request).await?;
+        println!("output: {output}");
         return Ok(());
     }
 
@@ -1683,11 +1677,119 @@ fn default_peers() -> Vec<PeerInfo> {
     ]
 }
 
+/// Start an iroh QUIC inference server that accepts tensor-pipeline requests.
+///
+/// Prints the node's iroh `node_id` on startup so you can pass it to
+/// `dist-run --executor iroh --peers <node_id>`.
+///
+/// With `--model-path` (and `--features burn`), loads a real `LlamaShard` from
+/// a safetensors checkpoint and serves that shard's layers.  Without a model
+/// path, serves a `MockInferenceServer` (useful for end-to-end connectivity
+/// tests before loading real weights).
+async fn cmd_serve(args: &[String]) -> Result<()> {
+    let kv_ttl_secs: u64 = get_arg(args, "--kv-ttl-secs")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    #[cfg(feature = "burn")]
+    let kv_ttl = kv_ttl_secs;
+    #[cfg(not(feature = "burn"))]
+    let _ = kv_ttl_secs;
+
+    let endpoint = Endpoint::bind().await?;
+    let node_id = endpoint.id();
+    println!("node_id:  {node_id}");
+    println!("hint:     mesh-node dist-run --executor iroh --peers {node_id} ...");
+
+    // ── Real shard (burn feature only) ───────────────────────────────────────
+    #[cfg(feature = "burn")]
+    if let Some(model_path) = get_arg(args, "--model-path") {
+        use inference_coordinator::{LlamaShard, LlamaShardConfig};
+
+        let layer_start = get_arg(args, "--layer-start")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let layer_end = get_arg(args, "--layer-end")
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or_else(|| anyhow!("--layer-end is required when --model-path is set"))?;
+        let total_layers = get_arg(args, "--total-layers")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(layer_end);
+        let num_attention_heads = get_arg(args, "--heads")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(32);
+        let num_key_value_heads = get_arg(args, "--kv-heads")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(num_attention_heads);
+        let hidden_size = get_arg(args, "--hidden")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4096);
+        let intermediate_size = get_arg(args, "--intermediate")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(11008);
+        let vocab_size = get_arg(args, "--vocab")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(32000);
+        let rope_theta = get_arg(args, "--rope-theta")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(10000.0);
+        let rms_norm_eps = get_arg(args, "--rms-eps")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1e-5);
+        let max_seq_len = get_arg(args, "--max-seq-len")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4096);
+
+        let shard_config = LlamaShardConfig {
+            layer_start,
+            layer_end,
+            total_layers,
+            num_attention_heads,
+            num_key_value_heads,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            rope_theta,
+            rms_norm_eps,
+            max_seq_len,
+        };
+
+        // Support comma-separated list of safetensors shards
+        let weight_files: Vec<String> = model_path
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        println!("loading shard layers {}..{} from {:?} ...", layer_start, layer_end, weight_files);
+        let shard = LlamaShard::load_wgpu(&weight_files, shard_config)?;
+        println!("shard loaded — serving on {node_id}");
+
+        let server = InferenceServer::new(shard, kv_ttl);
+        let _router = Router::builder(endpoint)
+            .accept(INFERENCE_ALPN, server)
+            .spawn();
+
+        println!("press Ctrl-C to stop");
+        tokio::signal::ctrl_c().await.ok();
+        return Ok(());
+    }
+
+    // ── Mock server (no weights / burn feature disabled) ─────────────────────
+    let server = MockInferenceServer::new();
+    println!("no --model-path provided — serving mock inference");
+    let _router = Router::builder(endpoint)
+        .accept(INFERENCE_ALPN, server)
+        .spawn();
+
+    println!("press Ctrl-C to stop");
+    tokio::signal::ctrl_c().await.ok();
+    Ok(())
+}
+
 fn print_usage() {
     println!("mesh-node estimate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--nodes 4] [--kv-bytes 1] [--overhead 1.15] [--runtime-overhead 0.15]");
     println!("mesh-node capacity --free-vram 8 [--max-nodes 8] [--current-nodes 2] [--seq 4096] [--quant 4] [--kv-bytes 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
     println!("mesh-node dist-plan --peers id1,id2 [--min-layers-per-peer 1] [--models models.json --model stablelm-3b-4e1t] OR [--config model.json --params-b 2.8]");
     println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|burn|iroh --model-path /path/to/model.safetensors --model-device ndarray|wgpu --model-mode simulate|mlp|weights|forward|embed --model-hidden 8 --model-tensor NAME --model-sample-bytes 256]");
+    println!("mesh-node serve [--model-path /path/to/model.safetensors --layer-start 0 --layer-end 16 --total-layers 32 --hidden 4096 --intermediate 11008 --vocab 32000 --heads 32 --kv-heads 32 --rope-theta 10000] [--kv-ttl-secs 300]");
     println!("mesh-node simulate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--peers peers.json] [--rtt-samples rtt.json]");
     println!("mesh-node gossip --topic <64-hex> [--bootstrap <endpoint_id> ...] [--interval 10] [--rtt-probe] [--rtt-timeout-ms 3000] [--peer-ttl-ms 15000] [--peer-fail-threshold 3] [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000] [--load-penalty 0.05] [--load-decay 0.9] [--config config.json] [--params-b 117] [--model-name primary] [--models models.json] [--fallback-model name:/path/to/config.json:params_b] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--free-vram 48] [--reserve-gb 4] [--safety-factor 0.7] [--min-inference-gb 6] [--role inference|routing|cache] [--state-dir state] [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8] [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]");
     println!("mesh-node infer-http --api-base http://127.0.0.1:8000/v1 --model gpt-oss-20b --prompt \"Hello\" [--system \"You are ...\"] [--max-tokens 128] [--temperature 0.2] [--api-key sk-...]");
