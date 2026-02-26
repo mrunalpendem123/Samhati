@@ -13,11 +13,35 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+
+use inference_coordinator::{Coordinator, IrohDistributedExecutor, InferenceRequest, SwarmPlanner};
+use proximity_router::SwarmRegistry;
 
 use crate::inference::{infer_http, infer_http_stream, infer_local_exec, words_stream, ChatMessage, LocalExecConfig};
 
-#[derive(Debug, Clone)]
+pub struct SwarmHandle {
+    pub endpoint: iroh::Endpoint,
+    pub registry: Arc<RwLock<SwarmRegistry>>,
+    pub model_name: String,
+    pub total_layers: usize,
+    pub layers_per_shard: usize,
+    pub max_retries: usize,
+}
+
+impl SwarmHandle {
+    pub async fn run(&self, req: InferenceRequest) -> anyhow::Result<String> {
+        let planner = SwarmPlanner::new(self.layers_per_shard);
+        let plan = {
+            let reg = self.registry.read().await;
+            planner.plan(&self.model_name, self.total_layers, &reg)?
+        };
+        let executor = IrohDistributedExecutor::new(self.endpoint.clone())
+            .with_registry(self.registry.clone(), &self.model_name, self.max_retries);
+        Coordinator::new(plan, executor).generate(req).await
+    }
+}
+
 pub struct ApiConfig {
     pub bind: String,
     pub infer_base: Option<String>,
@@ -28,9 +52,9 @@ pub struct ApiConfig {
     pub allow_models: Vec<String>,
     pub rate_limit_rps: Option<f64>,
     pub rate_limit_burst: Option<u32>,
+    pub swarm: Option<Arc<SwarmHandle>>,
 }
 
-#[derive(Debug, Clone)]
 pub struct ApiState {
     pub infer_base: Option<String>,
     pub infer_key: Option<String>,
@@ -39,6 +63,7 @@ pub struct ApiState {
     pub api_auth: Option<String>,
     pub allow_models: Option<HashSet<String>>,
     rate_limiter: Option<Arc<Mutex<RateLimiter>>>,
+    pub swarm: Option<Arc<SwarmHandle>>,
 }
 
 pub async fn serve(config: ApiConfig) -> Result<()> {
@@ -54,6 +79,7 @@ pub async fn serve(config: ApiConfig) -> Result<()> {
             Some(config.allow_models.into_iter().collect())
         },
         rate_limiter: build_rate_limiter(config.rate_limit_rps, config.rate_limit_burst),
+        swarm: config.swarm,
     };
 
     let app = Router::new()
@@ -157,11 +183,11 @@ async fn chat_completions(
     if let Err(resp) = check_rate_limit(&state).await {
         return resp;
     }
-    if state.infer_base.is_none() && state.local_exec.is_none() {
+    if state.infer_base.is_none() && state.local_exec.is_none() && state.swarm.is_none() {
         return api_error(
             StatusCode::NOT_IMPLEMENTED,
             "not_configured",
-            "inference backend not configured (set --infer-base or --local-bin/--local-args/--local-model)",
+            "inference backend not configured (set --infer-base, --local-bin/--local-args/--local-model, or --topic for swarm)",
         );
     }
     if req.messages.is_empty() {
@@ -190,7 +216,29 @@ async fn chat_completions(
     // ── Streaming path ────────────────────────────────────────────────────────
     if req.stream.unwrap_or(false) {
         let content_stream: BoxStream<'static, String> =
-            if let Some(local) = state.local_exec.clone() {
+            if let Some(swarm) = state.swarm.clone() {
+                let prompt = messages
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let infer_req = InferenceRequest {
+                    request_id: completion_id.clone(),
+                    input: prompt,
+                    max_tokens,
+                    temperature,
+                };
+                match swarm.run(infer_req).await {
+                    Ok(text) => Box::pin(words_stream(text)),
+                    Err(e) => {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "swarm_error",
+                            &e.to_string(),
+                        );
+                    }
+                }
+            } else if let Some(local) = state.local_exec.clone() {
                 match infer_local_exec(&local, messages, max_tokens, temperature).await {
                     Ok(text) => Box::pin(words_stream(text)),
                     Err(e) => {
@@ -227,7 +275,25 @@ async fn chat_completions(
     }
 
     // ── Non-streaming path ────────────────────────────────────────────────────
-    let content = if let Some(local) = state.local_exec.clone() {
+    let content = if let Some(swarm) = state.swarm.clone() {
+        let prompt = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let infer_req = InferenceRequest {
+            request_id: completion_id.clone(),
+            input: prompt,
+            max_tokens,
+            temperature,
+        };
+        match swarm.run(infer_req).await {
+            Ok(c) => c,
+            Err(e) => {
+                return api_error(StatusCode::BAD_GATEWAY, "swarm_error", &e.to_string());
+            }
+        }
+    } else if let Some(local) = state.local_exec.clone() {
         match infer_local_exec(&local, messages, max_tokens, temperature).await {
             Ok(c) => c,
             Err(e) => {

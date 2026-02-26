@@ -1280,6 +1280,98 @@ async fn cmd_api(args: &[String]) -> Result<()> {
         }),
         _ => None,
     };
+
+    // ── Optional swarm backend ─────────────────────────────────────────────
+    let swarm = if let Some(topic_hex) = get_arg(args, "--topic") {
+        let topic = parse_topic_id(&topic_hex)?;
+        let bootstrap_ids = parse_bootstrap_ids(args)?;
+
+        let discover_secs: u64 = get_arg(args, "--discover-secs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+        let max_retries: usize = get_arg(args, "--max-retries")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let layers_per_shard: usize = get_arg(args, "--layers-per-shard")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+
+        // Determine total_layers from --total-layers or from --models + --model
+        let total_layers: usize = if let Some(n) = get_arg(args, "--total-layers").and_then(|v| v.parse().ok()) {
+            n
+        } else if let Some(models_path) = get_arg(args, "--models") {
+            let entries = load_model_registry(&models_path)?;
+            let model_name = get_arg(args, "--swarm-model")
+                .or_else(|| get_arg(args, "--model"))
+                .unwrap_or_else(|| entries.first().map(|e| e.name.clone()).unwrap_or_default());
+            let entry = entries
+                .into_iter()
+                .find(|e| e.name == model_name)
+                .ok_or_else(|| anyhow!("model '{model_name}' not found in registry"))?;
+            let cfg = ModelConfig::from_json_file(&entry.config_path, entry.params_b)?;
+            cfg.n_layers
+        } else {
+            return Err(anyhow!("--total-layers or --models is required when using --topic"));
+        };
+
+        let swarm_model = get_arg(args, "--swarm-model")
+            .or_else(|| get_arg(args, "--model"))
+            .ok_or_else(|| anyhow!("--swarm-model is required when using --topic"))?;
+
+        let endpoint = Endpoint::bind().await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let _router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .spawn();
+
+        eprintln!("joining gossip topic {topic_hex}, discovering peers for {discover_secs}s...");
+        let registry = Arc::new(RwLock::new(SwarmRegistry::new(StdDuration::from_secs(300))));
+        let registry_clone = registry.clone();
+
+        let (_, mut recv) = gossip.subscribe(topic, bootstrap_ids).await?.split();
+        let _discovery = tokio::spawn(async move {
+            while let Some(Ok(Event::Received(msg))) = recv.next().await {
+                let body = String::from_utf8_lossy(&msg.content);
+                if let Some(caps) = parse_capability(&body) {
+                    let layers: Vec<proximity_router::swarm::LayerRange> = caps
+                        .layers_hosted
+                        .iter()
+                        .cloned()
+                        .map(proximity_router::swarm::LayerRange::from)
+                        .collect();
+                    let metrics = proximity_router::PeerMetrics {
+                        rtt_ms: caps.rtt_ms,
+                        bandwidth_mbps: caps.bandwidth_mbps,
+                        reliability: caps.reliability,
+                        gpu_capacity_score: caps.gpu_capacity_score,
+                        free_vram_gb: Some(caps.free_vram_gb),
+                        last_seen_epoch_ms: None,
+                    };
+                    registry_clone.write().await.upsert(
+                        caps.node_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
+                    );
+                    eprintln!("  discovered peer {}", caps.node_id);
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_secs(discover_secs)).await;
+
+        let peer_count = registry.read().await.peer_count();
+        eprintln!("discovered {peer_count} peer(s), starting API server...");
+
+        Some(Arc::new(api::SwarmHandle {
+            endpoint,
+            registry,
+            model_name: swarm_model,
+            total_layers,
+            layers_per_shard,
+            max_retries,
+        }))
+    } else {
+        None
+    };
+
     serve_api(ApiConfig {
         bind,
         infer_base,
@@ -1290,6 +1382,7 @@ async fn cmd_api(args: &[String]) -> Result<()> {
         allow_models,
         rate_limit_rps,
         rate_limit_burst,
+        swarm,
     })
     .await
 }
@@ -1347,7 +1440,21 @@ fn apply_kv_bits_arg(args: &[String], input: &mut EstimateInput) {
 
 fn load_model_registry(path: &str) -> Result<Vec<ModelRegistryEntry>> {
     let data = fs::read_to_string(path)?;
-    let entries: Vec<ModelRegistryEntry> = serde_json::from_str(&data)?;
+    let mut entries: Vec<ModelRegistryEntry> = serde_json::from_str(&data)?;
+    // Resolve relative config_paths against the models.json directory so the
+    // path works regardless of CWD.
+    let base = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    for entry in &mut entries {
+        if !std::path::Path::new(&entry.config_path).is_absolute() {
+            entry.config_path = base
+                .join(&entry.config_path)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
     Ok(entries)
 }
 
