@@ -192,13 +192,29 @@ fn apply_rope<B: Backend>(
 // ── GQA helpers ───────────────────────────────────────────────────────────────
 
 /// Repeat KV heads to match the query head count for GQA.
+///
+/// Equivalent to `torch.repeat_interleave(x, n_rep, dim=1)`:
+/// each KV head is repeated `n_rep` times contiguously so that query head
+/// groups align with their corresponding KV head.
+///
 /// `x`: `[batch, n_kv_heads, seq, head_dim]` → `[batch, n_heads, seq, head_dim]`
+///
+/// Example (n_kv_heads=2, n_rep=2):
+///   input heads : [h0, h1]
+///   output heads: [h0, h0, h1, h1]   ← each head repeated, then next head
 fn repeat_kv<B: Backend>(x: Tensor<B, 4>, n_rep: usize) -> Tensor<B, 4> {
     if n_rep == 1 {
         return x;
     }
-    let copies: Vec<Tensor<B, 4>> = (0..n_rep).map(|_| x.clone()).collect();
-    Tensor::cat(copies, 1)
+    let [b, n_kv_heads, s, d] = x.dims();
+    let mut chunks: Vec<Tensor<B, 4>> = Vec::with_capacity(n_kv_heads * n_rep);
+    for h in 0..n_kv_heads {
+        let head = x.clone().slice([0..b, h..h + 1, 0..s, 0..d]);
+        for _ in 0..n_rep {
+            chunks.push(head.clone());
+        }
+    }
+    Tensor::cat(chunks, 1)
 }
 
 // ── Attention layer ───────────────────────────────────────────────────────────
@@ -710,5 +726,284 @@ impl LlamaShard<crate::InferenceBackend> {
     ) -> Result<Self> {
         use burn::backend::wgpu::WgpuDevice;
         Self::load(weight_files, cfg, WgpuDevice::BestAvailable)
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+//
+// Run with: cargo test -p inference-coordinator --features burn
+//
+// All tests use the CPU NdArray backend so they require no GPU and run fast.
+// They validate `rotate_half`, `apply_rope`, and `repeat_kv` against
+// hand-computed reference values derived from the standard Llama RoPE / GQA
+// formulae.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::ndarray::NdArrayDevice;
+    use burn::backend::NdArray;
+    use burn::tensor::{Tensor, TensorData};
+
+    type TB = NdArray;
+
+    fn cpu() -> NdArrayDevice {
+        NdArrayDevice::Cpu
+    }
+
+    /// Extract flat f32 values from a tensor (row-major / C-order).
+    fn to_f32(t: Tensor<TB, 4>) -> Vec<f32> {
+        t.into_data().to_vec().unwrap()
+    }
+
+    fn assert_close(got: &[f32], expected: &[f32], eps: f32, label: &str) {
+        assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < eps,
+                "{label}[{i}]: got {g:.7}, expected {e:.7} (eps={eps})"
+            );
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // rotate_half
+    //
+    // Definition: rotate_half([x1 | x2]) = [-x2 | x1]
+    // where x1 is the first half of the last dimension and x2 the second half.
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rotate_half_basic() {
+        // Shape [1, 1, 1, 4]:  x1=[1,2]  x2=[3,4]
+        // Expected:            [-3, -4, 1, 2]
+        let d = cpu();
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![1.0f32, 2.0, 3.0, 4.0], [1, 1, 1, 4]),
+            &d,
+        );
+        let got = to_f32(rotate_half(x));
+        assert_close(&got, &[-3.0, -4.0, 1.0, 2.0], 1e-6, "rotate_half basic");
+    }
+
+    #[test]
+    fn test_rotate_half_two_heads() {
+        // Shape [1, 2, 1, 4]:
+        //   head 0: [1, 2, 3, 4] → [-3, -4, 1, 2]
+        //   head 1: [5, 6, 7, 8] → [-7, -8, 5, 6]
+        let d = cpu();
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [1, 2, 1, 4]),
+            &d,
+        );
+        let got = to_f32(rotate_half(x));
+        assert_close(
+            &got,
+            &[-3.0, -4.0, 1.0, 2.0, -7.0, -8.0, 5.0, 6.0],
+            1e-6,
+            "rotate_half two heads",
+        );
+    }
+
+    #[test]
+    fn test_rotate_half_applied_twice_negates() {
+        // rotate_half(rotate_half(x)) == -x for any x.
+        // Proof: rotate_half([-x2|x1]) = [-x1|-x2] = -(x1|x2) = -x
+        let d = cpu();
+        let data = vec![1.0f32, -2.0, 3.0, -4.0];
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(data.clone(), [1, 1, 1, 4]),
+            &d,
+        );
+        let got = to_f32(rotate_half(rotate_half(x)));
+        let expected: Vec<f32> = data.iter().map(|v| -v).collect();
+        assert_close(&got, &expected, 1e-6, "rotate_half twice → negation");
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // apply_rope
+    //
+    // Standard Llama RoPE with rotate-half style:
+    //   freqs[i]  = 1 / theta^(2i / head_dim)   for i in [0, head_dim/2)
+    //   angle[p,i] = position_p * freqs[i]
+    //   cos_full = [cos(angle[p,0]), …, cos(angle[p,half-1]),
+    //               cos(angle[p,0]), …, cos(angle[p,half-1])]   (duplicated)
+    //   sin_full  = (same pattern with sin)
+    //   x_rot     = x * cos_full + rotate_half(x) * sin_full
+    //
+    // At position 0 every angle is 0 → cos=1, sin=0 → identity.
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_rope_position_zero_is_identity() {
+        // At position 0 all angles are 0, so the rotation is the identity.
+        let d = cpu();
+        let q_data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let k_data = vec![5.0f32, 6.0, 7.0, 8.0];
+        let q = Tensor::<TB, 4>::from_data(
+            TensorData::new(q_data.clone(), [1, 1, 1, 4]),
+            &d,
+        );
+        let k = Tensor::<TB, 4>::from_data(
+            TensorData::new(k_data.clone(), [1, 1, 1, 4]),
+            &d,
+        );
+        let (q_rot, k_rot) = apply_rope(q, k, /*seq_offset=*/0, /*head_dim=*/4, /*theta=*/10000.0, &d);
+        assert_close(&to_f32(q_rot), &q_data, 1e-6, "rope pos=0 q");
+        assert_close(&to_f32(k_rot), &k_data, 1e-6, "rope pos=0 k");
+    }
+
+    #[test]
+    fn test_apply_rope_single_token_known_values() {
+        // head_dim=4, half=2, theta=10000, token at position 1 (seq_offset=1).
+        //
+        // freqs = [1/(10000^(0/4)), 1/(10000^(2/4))] = [1.0, 0.01]
+        // angles at pos 1 = [1.0, 0.01]
+        // cos = [cos(1), cos(0.01), cos(1), cos(0.01)]
+        // sin = [sin(1), sin(0.01), sin(1), sin(0.01)]
+        //
+        // q = [1, 0, 0, 0]
+        //   rotate_half(q) = [0, 0, 1, 0]
+        //   q_rot = [cos(1), 0, sin(1), 0]
+        //
+        // k = [0, 1, 0, 0]
+        //   rotate_half(k) = [0, 0, 0, 1]
+        //   k_rot = [0, cos(0.01), 0, sin(0.01)]
+        let d = cpu();
+        let q = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![1.0f32, 0.0, 0.0, 0.0], [1, 1, 1, 4]),
+            &d,
+        );
+        let k = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![0.0f32, 1.0, 0.0, 0.0], [1, 1, 1, 4]),
+            &d,
+        );
+        let (q_rot, k_rot) = apply_rope(q, k, /*seq_offset=*/1, 4, 10000.0, &d);
+
+        let cos1: f32 = 1.0_f32.cos();
+        let sin1: f32 = 1.0_f32.sin();
+        let cos001: f32 = 0.01_f32.cos();
+        let sin001: f32 = 0.01_f32.sin();
+
+        assert_close(&to_f32(q_rot), &[cos1, 0.0, sin1, 0.0],       1e-5, "rope single q");
+        assert_close(&to_f32(k_rot), &[0.0, cos001, 0.0, sin001],    1e-5, "rope single k");
+    }
+
+    #[test]
+    fn test_apply_rope_multi_token_sequence() {
+        // Two tokens, seq_offset=0: positions are [0, 1].
+        // Token 0 (pos 0) → identity.
+        // Token 1 (pos 1) → same rotation as single-token test above.
+        //
+        // q shape: [1, 1, 2, 4], both tokens = [1, 0, 0, 0]
+        // Expected q_rot: [[1,0,0,0], [cos(1),0,sin(1),0]]
+        let d = cpu();
+        let q_data = vec![1.0f32, 0.0, 0.0, 0.0,  // token 0
+                          1.0,    0.0, 0.0, 0.0];  // token 1
+        let k_data = vec![0.0f32, 1.0, 0.0, 0.0,  // token 0
+                          0.0,    1.0, 0.0, 0.0];  // token 1
+        let q = Tensor::<TB, 4>::from_data(TensorData::new(q_data, [1, 1, 2, 4]), &d);
+        let k = Tensor::<TB, 4>::from_data(TensorData::new(k_data, [1, 1, 2, 4]), &d);
+
+        let (q_rot, k_rot) = apply_rope(q, k, /*seq_offset=*/0, 4, 10000.0, &d);
+
+        let cos1:   f32 = 1.0_f32.cos();
+        let sin1:   f32 = 1.0_f32.sin();
+        let cos001: f32 = 0.01_f32.cos();
+        let sin001: f32 = 0.01_f32.sin();
+
+        // token 0: identity; token 1: rotated
+        let q_expected = vec![
+            1.0, 0.0, 0.0, 0.0,           // pos 0 – identity
+            cos1, 0.0, sin1, 0.0,          // pos 1
+        ];
+        let k_expected = vec![
+            0.0, 1.0, 0.0, 0.0,           // pos 0 – identity
+            0.0, cos001, 0.0, sin001,      // pos 1
+        ];
+        assert_close(&to_f32(q_rot), &q_expected, 1e-5, "rope multi q");
+        assert_close(&to_f32(k_rot), &k_expected, 1e-5, "rope multi k");
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // repeat_kv  (GQA head expansion)
+    //
+    // Correct semantics: each KV head is repeated n_rep times contiguously,
+    // matching torch.repeat_interleave(x, n_rep, dim=1).
+    //
+    //   n_kv_heads=2, n_rep=2  →  [h0, h0, h1, h1]
+    //
+    // The previous (buggy) implementation concatenated n_rep full copies of x:
+    //   →  [h0, h1, h0, h1]   — wrong; query head groups would attend the
+    //      wrong KV heads in GQA models (Llama-3+, Mistral, etc.).
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_repeat_kv_n_rep_1_is_passthrough() {
+        let d = cpu();
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let x = Tensor::<TB, 4>::from_data(TensorData::new(data.clone(), [1, 2, 1, 2]), &d);
+        assert_close(&to_f32(repeat_kv(x, 1)), &data, 1e-6, "repeat_kv n_rep=1");
+    }
+
+    #[test]
+    fn test_repeat_kv_gqa_two_heads_n_rep_2() {
+        // n_kv_heads=2, n_rep=2 → n_heads=4
+        // head 0 = [1, 2]  (query heads 0 and 1 attend this KV head)
+        // head 1 = [3, 4]  (query heads 2 and 3 attend this KV head)
+        //
+        // Correct output (repeat_interleave): [h0, h0, h1, h1]
+        //   flat: [1, 2, 1, 2, 3, 4, 3, 4]
+        //
+        // Previous buggy output (repeat tile): [h0, h1, h0, h1]
+        //   flat: [1, 2, 3, 4, 1, 2, 3, 4]   ← wrong KV alignment
+        let d = cpu();
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![1.0f32, 2.0, 3.0, 4.0], [1, 2, 1, 2]),
+            &d,
+        );
+        let out = repeat_kv(x, 2);
+        assert_eq!(out.dims(), [1, 4, 1, 2], "repeat_kv shape");
+        assert_close(
+            &to_f32(out),
+            &[1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0],
+            1e-6,
+            "repeat_kv GQA 2×2",
+        );
+    }
+
+    #[test]
+    fn test_repeat_kv_three_kv_heads_n_rep_4() {
+        // n_kv_heads=3, n_rep=4 → n_heads=12
+        // Verify that each KV head appears exactly n_rep times consecutively.
+        let d = cpu();
+        // head_dim=1 for simplicity: head 0=10, head 1=20, head 2=30
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![10.0f32, 20.0, 30.0], [1, 3, 1, 1]),
+            &d,
+        );
+        let out = repeat_kv(x, 4);
+        assert_eq!(out.dims(), [1, 12, 1, 1]);
+        let got = to_f32(out);
+        // Expected: [10,10,10,10, 20,20,20,20, 30,30,30,30]
+        let expected: Vec<f32> = [10.0f32; 4]
+            .iter()
+            .chain([20.0f32; 4].iter())
+            .chain([30.0f32; 4].iter())
+            .copied()
+            .collect();
+        assert_close(&got, &expected, 1e-6, "repeat_kv 3 heads × 4");
+    }
+
+    #[test]
+    fn test_repeat_kv_output_shape() {
+        // Generic shape check: [batch=2, n_kv=4, seq=7, head_dim=8], n_rep=3
+        // → [2, 12, 7, 8]
+        let d = cpu();
+        let x = Tensor::<TB, 4>::from_data(
+            TensorData::new(vec![0.0f32; 2 * 4 * 7 * 8], [2, 4, 7, 8]),
+            &d,
+        );
+        assert_eq!(repeat_kv(x, 3).dims(), [2, 12, 7, 8]);
     }
 }
