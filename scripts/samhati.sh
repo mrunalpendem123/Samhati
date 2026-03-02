@@ -57,7 +57,6 @@ if [ -z "$JOIN_CODE" ]; then
 
   eval ./target/release/mesh-node serve \
     --model-path '"$WEIGHT_FILES"' \
-    --store-path '"$WEIGHTS/shard-cache"' \
     --layer-start 0 --layer-end $HALF --total-layers $TOTAL_LAYERS \
     $ARCH_ARGS \
     --topic "$TOPIC" \
@@ -173,7 +172,6 @@ else
 
   ./target/release/mesh-node serve \
     --model-path "$WEIGHT_FILES" \
-    --store-path "$WEIGHTS/shard-cache" \
     --layer-start $HALF --layer-end $TOTAL_LAYERS --total-layers $TOTAL_LAYERS \
     $ARCH_ARGS \
     --topic "$TOPIC" \
