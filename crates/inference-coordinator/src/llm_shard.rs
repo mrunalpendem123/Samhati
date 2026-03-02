@@ -31,7 +31,7 @@ use anyhow::{anyhow, Result};
 use burn::module::{ConstantRecord, Param};
 use burn::nn::{
     Embedding, EmbeddingConfig, EmbeddingRecord,
-    Linear, LinearConfig, LinearRecord,
+    Linear, LinearConfig, LinearLayout, LinearRecord,
     RmsNorm, RmsNormConfig, RmsNormRecord,
 };
 use burn::prelude::Module;
@@ -462,24 +462,16 @@ pub struct LlamaShard<B: Backend> {
 }
 
 impl<B: Backend> LlamaShard<B> {
-    /// Load a shard from one or more safetensors files.
+    /// Inner loader — operates on pre-read byte buffers.
     ///
-    /// `weight_files` should list all `.safetensors` shards that together
-    /// contain the weights for `[cfg.layer_start, cfg.layer_end)`.
-    pub fn load(
-        weight_files: &[impl AsRef<Path>],
+    /// Called by both `load` (which reads files) and `load_from_bytes` (which
+    /// takes a single raw byte slice).  Each element of `bytes_vec` represents
+    /// one safetensors file; the helper searches them in order for each tensor.
+    fn load_from_byte_slices(
+        bytes_vec: Vec<Vec<u8>>,
         cfg: LlamaShardConfig,
         device: B::Device,
     ) -> Result<Self> {
-        // Merge all safetensors files into one in-memory byte buffer, then
-        // open the first file for tensor access.  For simplicity we load
-        // tensors from each file in sequence, delegating to the first file
-        // that contains the requested tensor name.
-        let bytes_vec: Vec<Vec<u8>> = weight_files
-            .iter()
-            .map(|p| std::fs::read(p.as_ref()))
-            .collect::<std::io::Result<_>>()?;
-
         // We use a helper that tries each file until the tensor is found.
         let load_from_files = |tensor_name: &str| -> Result<Vec<f32>> {
             for bytes in &bytes_vec {
@@ -504,6 +496,11 @@ impl<B: Backend> LlamaShard<B> {
         };
 
         // Helper: build a Linear (no bias) from raw f32 data.
+        //
+        // HuggingFace/safetensors stores weight as [out_features, in_features].
+        // Burn 0.20 `LinearLayout::Col` records are also expected in that format
+        // and the load_mapper automatically transposes to [in_features, out_features]
+        // for the internal forward pass (`x @ w`).
         let mk_linear = |name: &str, in_d: usize, out_d: usize| -> Result<Linear<B>> {
             let data = load_from_files(name)?;
             let weight = Tensor::<B, 2>::from_data(
@@ -516,6 +513,7 @@ impl<B: Backend> LlamaShard<B> {
             };
             Ok(LinearConfig::new(in_d, out_d)
                 .with_bias(false)
+                .with_layout(LinearLayout::Col)
                 .init::<B>(&device)
                 .load_record(record))
         };
@@ -629,6 +627,34 @@ impl<B: Backend> LlamaShard<B> {
         Ok(Self { cfg, embed, layers, final_norm, lm_head, device })
     }
 
+    /// Load a shard from one or more safetensors files.
+    ///
+    /// `weight_files` should list all `.safetensors` shards that together
+    /// contain the weights for `[cfg.layer_start, cfg.layer_end)`.
+    pub fn load(
+        weight_files: &[impl AsRef<Path>],
+        cfg: LlamaShardConfig,
+        device: B::Device,
+    ) -> Result<Self> {
+        let bytes_vec: Vec<Vec<u8>> = weight_files
+            .iter()
+            .map(|p| std::fs::read(p.as_ref()))
+            .collect::<std::io::Result<_>>()?;
+        Self::load_from_byte_slices(bytes_vec, cfg, device)
+    }
+
+    /// Load a shard from raw safetensors bytes.
+    ///
+    /// Useful when bytes have been fetched from a `ShardStore` or any other
+    /// content-addressed store rather than read from a file path.
+    pub fn load_from_bytes(
+        bytes: &[u8],
+        cfg: LlamaShardConfig,
+        device: B::Device,
+    ) -> Result<Self> {
+        Self::load_from_byte_slices(vec![bytes.to_vec()], cfg, device)
+    }
+
     pub fn config(&self) -> &LlamaShardConfig {
         &self.cfg
     }
@@ -726,6 +752,15 @@ impl LlamaShard<crate::InferenceBackend> {
     ) -> Result<Self> {
         use burn::backend::wgpu::WgpuDevice;
         Self::load(weight_files, cfg, WgpuDevice::BestAvailable)
+    }
+
+    /// Load from raw safetensors bytes using the best available WGPU device.
+    ///
+    /// Mirrors `load_wgpu` but accepts pre-fetched bytes (e.g. from a
+    /// `ShardStore`) instead of a file path.
+    pub fn load_from_bytes_wgpu(bytes: &[u8], cfg: LlamaShardConfig) -> Result<Self> {
+        use burn::backend::wgpu::WgpuDevice;
+        Self::load_from_bytes(bytes, cfg, WgpuDevice::BestAvailable)
     }
 }
 
@@ -1005,5 +1040,341 @@ mod tests {
             &d,
         );
         assert_eq!(repeat_kv(x, 3).dims(), [2, 12, 7, 8]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shared helpers for Items 2, 3, 4
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Config for the 2-layer hidden_size=8 toy model.
+    fn tiny_cfg(layer_start: usize, layer_end: usize, total: usize) -> LlamaShardConfig {
+        LlamaShardConfig {
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_attention_heads: 2,
+            num_key_value_heads: 2,
+            vocab_size: 32,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            max_seq_len: 64,
+            layer_start,
+            layer_end,
+            total_layers: total,
+        }
+    }
+
+    /// Build a minimal safetensors blob for the given layer range.
+    ///
+    /// All weights are a small constant (0.01) so activations stay finite.
+    /// Includes embed when `layer_start == 0`; includes norm + lm_head when
+    /// `layer_end == total`.
+    fn tiny_safetensors(layer_start: usize, layer_end: usize, total: usize) -> Vec<u8> {
+        use safetensors::{serialize, tensor::TensorView, Dtype};
+
+        let hidden: usize = 8;
+        let vocab: usize = 32;
+        let intermediate: usize = 16;
+        let is_first = layer_start == 0;
+        let is_last = layer_end == total;
+
+        let f32_bytes = |n: usize| -> Vec<u8> {
+            (0..n).flat_map(|_| 0.01f32.to_le_bytes()).collect()
+        };
+
+        let mut tensors: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+
+        if is_first {
+            tensors.push((
+                "model.embed_tokens.weight".into(),
+                vec![vocab, hidden],
+                f32_bytes(vocab * hidden),
+            ));
+        }
+
+        for l in layer_start..layer_end {
+            let p = format!("model.layers.{l}");
+            tensors.push((format!("{p}.input_layernorm.weight"), vec![hidden], f32_bytes(hidden)));
+            tensors.push((format!("{p}.self_attn.q_proj.weight"), vec![hidden, hidden], f32_bytes(hidden * hidden)));
+            tensors.push((format!("{p}.self_attn.k_proj.weight"), vec![hidden, hidden], f32_bytes(hidden * hidden)));
+            tensors.push((format!("{p}.self_attn.v_proj.weight"), vec![hidden, hidden], f32_bytes(hidden * hidden)));
+            tensors.push((format!("{p}.self_attn.o_proj.weight"), vec![hidden, hidden], f32_bytes(hidden * hidden)));
+            tensors.push((format!("{p}.post_attention_layernorm.weight"), vec![hidden], f32_bytes(hidden)));
+            tensors.push((format!("{p}.mlp.gate_proj.weight"), vec![intermediate, hidden], f32_bytes(intermediate * hidden)));
+            tensors.push((format!("{p}.mlp.up_proj.weight"), vec![intermediate, hidden], f32_bytes(intermediate * hidden)));
+            tensors.push((format!("{p}.mlp.down_proj.weight"), vec![hidden, intermediate], f32_bytes(hidden * intermediate)));
+        }
+
+        if is_last {
+            tensors.push(("model.norm.weight".into(), vec![hidden], f32_bytes(hidden)));
+            tensors.push(("lm_head.weight".into(), vec![vocab, hidden], f32_bytes(vocab * hidden)));
+        }
+
+        let pairs: Vec<(String, TensorView)> = tensors
+            .iter()
+            .map(|(name, shape, data)| {
+                let view = TensorView::new(Dtype::F32, shape.clone(), data)
+                    .expect("valid TensorView");
+                (name.clone(), view)
+            })
+            .collect();
+
+        serialize(pairs, &None).expect("safetensors serialize")
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Item 2 — Forward pass correctness
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_forward_deterministic() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 2, 2);
+        let shard = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 2, 2), d)
+            .expect("load shard");
+
+        let frame = TensorFrame::from_f32(&[1.0, 2.0], vec![1, 2], 0);
+
+        let mut session1 = SessionKv::new(2);
+        let out1 = shard.forward(&frame, &mut session1).expect("forward 1");
+
+        let mut session2 = SessionKv::new(2);
+        let out2 = shard.forward(&frame, &mut session2).expect("forward 2");
+
+        assert_eq!(
+            out1.to_f32_vec().unwrap(),
+            out2.to_f32_vec().unwrap(),
+            "forward should be deterministic"
+        );
+    }
+
+    #[test]
+    fn test_forward_valid_token_id() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 2, 2);
+        let shard = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 2, 2), d)
+            .expect("load shard");
+
+        let frame = TensorFrame::from_f32(&[1.0], vec![1, 1], 0);
+        let mut session = SessionKv::new(2);
+        let out = shard.forward(&frame, &mut session).expect("forward");
+
+        let vals = out.to_f32_vec().unwrap();
+        assert_eq!(vals.len(), 1);
+        let token_id = vals[0];
+        assert!(!token_id.is_nan(), "token id should not be NaN");
+        assert!(
+            token_id >= 0.0 && token_id < 32.0,
+            "token id {token_id} out of vocab range [0, 32)"
+        );
+    }
+
+    #[test]
+    fn test_forward_non_final_shard_shape() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        // Shard with layer_end < total_layers → returns hidden states, not a token id
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 1, 2);
+        let shard = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 1, 2), d)
+            .expect("load non-final shard");
+
+        let frame = TensorFrame::from_f32(&[1.0, 2.0], vec![1, 2], 0);
+        let mut session = SessionKv::new(1);
+        let out = shard.forward(&frame, &mut session).expect("forward");
+
+        assert_eq!(out.shape.len(), 3, "non-final shard output must be 3-D [batch, seq, hidden]");
+    }
+
+    #[test]
+    fn test_forward_seq_offset_propagates() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 2, 2);
+        let shard = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 2, 2), d)
+            .expect("load shard");
+
+        // 3-token prefill
+        let frame = TensorFrame::from_f32(&[1.0, 2.0, 3.0], vec![1, 3], 0);
+        let mut session = SessionKv::new(2);
+        let out = shard.forward(&frame, &mut session).expect("forward");
+
+        assert_eq!(
+            out.seq_offset, 3,
+            "seq_offset in output frame should equal number of input tokens"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Item 3 — KV cache cross-shard handoff
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_kv_prefill_accumulates() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let shard_a = LlamaShard::<TB>::load_from_bytes(
+            &tiny_safetensors(0, 1, 2),
+            tiny_cfg(0, 1, 2),
+            d,
+        )
+        .expect("load shard A");
+
+        let mut session_a = SessionKv::new(1);
+        let frame = TensorFrame::from_f32(&[1.0, 2.0, 3.0], vec![1, 3], 0);
+        shard_a.forward(&frame, &mut session_a).expect("forward");
+
+        assert_eq!(
+            session_a.layers[0].seq_len(),
+            3,
+            "after 3-token prefill, LayerKv seq_len should be 3"
+        );
+    }
+
+    #[test]
+    fn test_kv_decode_appends() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let shard_a = LlamaShard::<TB>::load_from_bytes(
+            &tiny_safetensors(0, 1, 2),
+            tiny_cfg(0, 1, 2),
+            d,
+        )
+        .expect("load shard A");
+
+        let mut session_a = SessionKv::new(1);
+
+        // Prefill 3 tokens
+        let prefill_frame = TensorFrame::from_f32(&[1.0, 2.0, 3.0], vec![1, 3], 0);
+        let prefill_out = shard_a.forward(&prefill_frame, &mut session_a).expect("prefill");
+        assert_eq!(session_a.layers[0].seq_len(), 3);
+
+        // Decode 1 token — seq_offset comes from prefill output
+        let decode_frame = TensorFrame::from_f32(&[4.0], vec![1, 1], prefill_out.seq_offset);
+        shard_a.forward(&decode_frame, &mut session_a).expect("decode");
+
+        assert_eq!(
+            session_a.layers[0].seq_len(),
+            4,
+            "after prefill(3) + decode(1), LayerKv seq_len should be 4"
+        );
+    }
+
+    #[test]
+    fn test_kv_two_shards_independent() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let shard_a = LlamaShard::<TB>::load_from_bytes(
+            &tiny_safetensors(0, 1, 2),
+            tiny_cfg(0, 1, 2),
+            d.clone(),
+        )
+        .expect("load shard A");
+
+        let shard_b = LlamaShard::<TB>::load_from_bytes(
+            &tiny_safetensors(1, 2, 2),
+            tiny_cfg(1, 2, 2),
+            d,
+        )
+        .expect("load shard B");
+
+        let mut session_a = SessionKv::new(1);
+        let mut session_b = SessionKv::new(1);
+
+        // 3-token prefill through shard A
+        let frame = TensorFrame::from_f32(&[1.0, 2.0, 3.0], vec![1, 3], 0);
+        let out_a = shard_a.forward(&frame, &mut session_a).expect("shard A forward");
+
+        // Pass shard A's hidden-state output to shard B
+        shard_b.forward(&out_a, &mut session_b).expect("shard B forward");
+
+        // Each shard accumulates its own KV cache independently
+        assert_eq!(session_a.layers[0].seq_len(), 3, "shard A KV cache seq_len");
+        assert_eq!(session_b.layers[0].seq_len(), 3, "shard B KV cache seq_len");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Item 4 — ShardStore → load_from_bytes roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_from_bytes_roundtrip() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 2, 2);
+        let shard = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 2, 2), d)
+            .expect("load_from_bytes");
+
+        let frame = TensorFrame::from_f32(&[1.0], vec![1, 1], 0);
+        let mut session = SessionKv::new(2);
+        let out = shard.forward(&frame, &mut session).expect("forward");
+
+        let vals = out.to_f32_vec().unwrap();
+        assert_eq!(vals.len(), 1);
+        assert!(!vals[0].is_nan(), "output token id should not be NaN");
+        assert!(
+            vals[0] >= 0.0 && vals[0] < 32.0,
+            "output {} should be a valid token id",
+            vals[0]
+        );
+    }
+
+    #[test]
+    fn test_shardstore_roundtrip() {
+        use crate::kv_cache::SessionKv;
+        use crate::tensor_frame::TensorFrame;
+
+        let d = cpu();
+        let bytes = tiny_safetensors(0, 2, 2);
+
+        // Use a unique temp dir to avoid collisions between test runs
+        let dir = std::env::temp_dir().join(format!(
+            "shard_store_fwd_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        ));
+        let store = shard_store::ShardStore::open(&dir).expect("open ShardStore");
+        let hash = store.add(&bytes).expect("add to store");
+        let retrieved = store.get(&hash).expect("get from store").expect("hash present");
+
+        // Load from store-retrieved bytes
+        let shard1 = LlamaShard::<TB>::load_from_bytes(&retrieved, tiny_cfg(0, 2, 2), d.clone())
+            .expect("load from store bytes");
+
+        // Load directly from original bytes for comparison
+        let shard2 = LlamaShard::<TB>::load_from_bytes(&bytes, tiny_cfg(0, 2, 2), d)
+            .expect("load from original bytes");
+
+        let frame = TensorFrame::from_f32(&[1.0], vec![1, 1], 0);
+
+        let mut session1 = SessionKv::new(2);
+        let out1 = shard1.forward(&frame, &mut session1).expect("forward 1");
+
+        let mut session2 = SessionKv::new(2);
+        let out2 = shard2.forward(&frame, &mut session2).expect("forward 2");
+
+        assert_eq!(
+            out1.to_f32_vec().unwrap(),
+            out2.to_f32_vec().unwrap(),
+            "ShardStore roundtrip should produce identical outputs"
+        );
     }
 }

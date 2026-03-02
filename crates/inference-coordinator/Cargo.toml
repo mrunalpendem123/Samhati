@@ -17,5 +17,8 @@ proximity-router = { path = "../proximity-router" }
 burn        = { version = "0.20", default-features = false, features = ["ndarray", "wgpu"], optional = true }
 safetensors = { version = "0.4", optional = true }
 
+[dev-dependencies]
+shard-store = { path = "../shard-store" }
+
 [features]
 burn = ["dep:burn", "dep:safetensors"]

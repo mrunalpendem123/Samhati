@@ -1989,68 +1989,84 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
 
     // ── Real shard (burn feature only) ───────────────────────────────────────
     #[cfg(feature = "burn")]
-    if let Some(model_path) = get_arg(args, "--model-path") {
-        use inference_coordinator::{LlamaShard, LlamaShardConfig};
+    {
+        let model_path   = get_arg(args, "--model-path");
+        let store_path   = get_arg(args, "--store-path");
+        let shard_hash   = get_arg(args, "--shard-hash");
 
-        let layer_start = get_arg(args, "--layer-start")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
-        let layer_end = get_arg(args, "--layer-end")
-            .and_then(|v| v.parse::<usize>().ok())
-            .ok_or_else(|| anyhow!("--layer-end is required when --model-path is set"))?;
-        let total_layers = get_arg(args, "--total-layers")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(layer_end);
-        let num_attention_heads = get_arg(args, "--heads")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(32);
-        let num_key_value_heads = get_arg(args, "--kv-heads")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(num_attention_heads);
-        let hidden_size = get_arg(args, "--hidden")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4096);
-        let intermediate_size = get_arg(args, "--intermediate")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(11008);
-        let vocab_size = get_arg(args, "--vocab")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(32000);
-        let rope_theta = get_arg(args, "--rope-theta")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(10000.0);
-        let rms_norm_eps = get_arg(args, "--rms-eps")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(1e-5);
-        let max_seq_len = get_arg(args, "--max-seq-len")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4096);
+        if model_path.is_some() || (store_path.is_some() && shard_hash.is_some()) {
+            use inference_coordinator::{LlamaShard, LlamaShardConfig};
 
-        let shard_config = LlamaShardConfig {
-            layer_start, layer_end, total_layers,
-            num_attention_heads, num_key_value_heads,
-            hidden_size, intermediate_size, vocab_size,
-            rope_theta, rms_norm_eps, max_seq_len,
-        };
+            let layer_start = get_arg(args, "--layer-start")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let layer_end = get_arg(args, "--layer-end")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(|| anyhow!("--layer-end is required when loading a shard"))?;
+            let total_layers = get_arg(args, "--total-layers")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(layer_end);
+            let num_attention_heads = get_arg(args, "--heads")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32);
+            let num_key_value_heads = get_arg(args, "--kv-heads")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(num_attention_heads);
+            let hidden_size = get_arg(args, "--hidden")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(4096);
+            let intermediate_size = get_arg(args, "--intermediate")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(11008);
+            let vocab_size = get_arg(args, "--vocab")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32000);
+            let rope_theta = get_arg(args, "--rope-theta")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(10000.0);
+            let rms_norm_eps = get_arg(args, "--rms-eps")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1e-5);
+            let max_seq_len = get_arg(args, "--max-seq-len")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(4096);
 
-        let weight_files: Vec<String> = model_path
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
-        println!("loading shard layers {}..{} from {:?} ...", layer_start, layer_end, weight_files);
-        let shard = LlamaShard::load_wgpu(&weight_files, shard_config)?;
-        println!("shard loaded — serving on {node_id}");
+            let shard_config = LlamaShardConfig {
+                layer_start, layer_end, total_layers,
+                num_attention_heads, num_key_value_heads,
+                hidden_size, intermediate_size, vocab_size,
+                rope_theta, rms_norm_eps, max_seq_len,
+            };
 
-        let server = InferenceServer::new(shard, kv_ttl);
-        let mut rb = Router::builder(endpoint).accept(INFERENCE_ALPN, server);
-        if let Some(g) = &gossip_opt {
-            rb = rb.accept(iroh_gossip::ALPN, g.clone());
+            let server = if let (Some(sp), Some(hh)) = (store_path, shard_hash) {
+                println!("loading shard layers {}..{} from store {} hash {} ...",
+                    layer_start, layer_end, sp, hh);
+                let store = shard_store::ShardStore::open(&sp)?;
+                let hash  = shard_store::Hash::from_hex(&hh)?;
+                InferenceServer::new_from_store(&store, &hash, shard_config, kv_ttl)?
+            } else {
+                let mp = model_path.unwrap();
+                let weight_files: Vec<String> = mp
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                println!("loading shard layers {}..{} from {:?} ...",
+                    layer_start, layer_end, weight_files);
+                let shard = LlamaShard::load_wgpu(&weight_files, shard_config)?;
+                InferenceServer::new(shard, kv_ttl)
+            };
+            println!("shard loaded — serving on {node_id}");
+
+            let mut rb = Router::builder(endpoint).accept(INFERENCE_ALPN, server);
+            if let Some(g) = &gossip_opt {
+                rb = rb.accept(iroh_gossip::ALPN, g.clone());
+            }
+            let _router = rb.spawn();
+
+            return run_gossip_announce_loop(
+                args, node_id.to_string(), topic_hex, bootstrap_ids, gossip_opt, announce_secs,
+            ).await;
         }
-        let _router = rb.spawn();
-
-        return run_gossip_announce_loop(
-            args, node_id.to_string(), topic_hex, bootstrap_ids, gossip_opt, announce_secs,
-        ).await;
     }
 
     // ── Mock server (no weights / burn feature disabled) ─────────────────────

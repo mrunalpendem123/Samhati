@@ -19,7 +19,7 @@ mod real {
     use anyhow::Result;
     use inference_coordinator::{
         kv_cache::{KvCacheStore, SessionKv},
-        llm_shard::LlamaShard,
+        llm_shard::{LlamaShard, LlamaShardConfig},
         rpc::{RpcRequest, RpcResponse},
         tensor_frame::TensorFrame,
         InferenceBackend,
@@ -54,6 +54,21 @@ mod real {
                 shard: Arc::new(Mutex::new(shard)),
                 kv: KvCacheStore::new(kv_ttl_secs),
             }
+        }
+
+        /// Load a shard from a content-addressed `ShardStore` and wrap it in
+        /// an `InferenceServer` ready to serve QUIC requests.
+        pub fn new_from_store(
+            store: &shard_store::ShardStore,
+            hash: &shard_store::Hash,
+            cfg: LlamaShardConfig,
+            kv_ttl_secs: u64,
+        ) -> anyhow::Result<Self> {
+            let bytes = store
+                .get(hash)?
+                .ok_or_else(|| anyhow::anyhow!("shard hash {} not in store", hash))?;
+            let shard = LlamaShard::load_from_bytes_wgpu(&bytes, cfg)?;
+            Ok(Self::new(shard, kv_ttl_secs))
         }
 
         async fn handle_stream(

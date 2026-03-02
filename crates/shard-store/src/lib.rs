@@ -30,6 +30,21 @@ impl Hash {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
+
+    /// Decode a 64-character lowercase hex string into a `Hash`.
+    pub fn from_hex(s: &str) -> anyhow::Result<Self> {
+        let bytes = hex::decode(s)
+            .map_err(|e| anyhow::anyhow!("invalid hex string: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "expected 32-byte (64-char hex) hash, got {} bytes",
+                bytes.len()
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Hash(arr))
+    }
 }
 
 impl std::fmt::Display for Hash {
