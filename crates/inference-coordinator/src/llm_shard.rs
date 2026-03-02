@@ -687,7 +687,26 @@ impl<B: Backend> LlamaShard<B> {
         // Final norm + lm_head (last shard only)
         let (final_norm, lm_head) = if cfg.is_last() {
             let norm = mk_rms("model.norm.weight", cfg.hidden_size)?;
-            let head = mk_linear("lm_head.weight", cfg.hidden_size, cfg.vocab_size)?;
+            // Qwen2.5 (and other models) weight-tie lm_head to embed_tokens —
+            // lm_head.weight is absent from the index; fall back transparently.
+            let head_data = load_from_files("lm_head.weight")
+                .or_else(|_| {
+                    eprintln!("  [lm_head] not found — using weight-tied embed_tokens");
+                    load_from_files("model.embed_tokens.weight")
+                })?;
+            let weight = Tensor::<B, 2>::from_data(
+                TensorData::new(head_data, [cfg.vocab_size, cfg.hidden_size]),
+                &device,
+            );
+            let record = LinearRecord {
+                weight: Param::from_tensor(weight),
+                bias: None,
+            };
+            let head = LinearConfig::new(cfg.hidden_size, cfg.vocab_size)
+                .with_bias(false)
+                .with_layout(LinearLayout::Col)
+                .init::<B>(&device)
+                .load_record(record);
             (Some(norm), Some(head))
         } else {
             (None, None)
