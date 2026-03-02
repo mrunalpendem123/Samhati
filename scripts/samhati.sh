@@ -17,7 +17,7 @@ HALF=$((TOTAL_LAYERS / 2))   # 18
 WEIGHTS=~/qwen25-3b
 
 # Fixed gossip topic for this model network.
-TOPIC="73616d6861746976317177656e322e352d33422d676f73736970746f706963303"
+TOPIC="73616d6861746976317177656e322e352d33422d676f73736970746f70696330"
 
 ARCH_ARGS="--hidden 2048 --intermediate 11008 --heads 16 --kv-heads 2 \
   --vocab 151936 --rope-theta 1000000 --rms-eps 0.000001"
