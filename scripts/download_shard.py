@@ -59,17 +59,22 @@ def files_for_layers(index: dict, layer_start: int, layer_end: int, total_layers
     return sorted(needed)
 
 def download_files(repo: str, filenames: list[str], out_dir: str):
-    """Download each file using huggingface-cli (handles auth, resume, etc)."""
-    includes = " ".join(f'"{f}"' for f in filenames)
-    cmd = (
-        f'huggingface-cli download {repo} '
-        f'--local-dir {out_dir} '
-        f'--include {includes} "config.json" "tokenizer.json" "tokenizer_config.json"'
-    )
-    print(f"\nRunning:\n  {cmd}\n")
-    ret = os.system(cmd)
-    if ret != 0:
-        sys.exit("Download failed. Make sure huggingface_hub is installed: pip install huggingface_hub")
+    """Download files using the huggingface_hub Python API (no CLI needed)."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        sys.exit("huggingface_hub not installed. Run: pip3 install huggingface_hub --break-system-packages")
+
+    all_files = filenames + ["config.json", "tokenizer.json", "tokenizer_config.json"]
+    for filename in all_files:
+        print(f"Downloading {filename}...")
+        try:
+            hf_hub_download(repo_id=repo, filename=filename, local_dir=out_dir)
+        except Exception as e:
+            if filename in ("tokenizer.json", "tokenizer_config.json"):
+                print(f"  (skipped — not found in repo)")
+            else:
+                sys.exit(f"Failed to download {filename}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Download only the weight files needed for your layer shard.")
