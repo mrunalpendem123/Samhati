@@ -41,14 +41,15 @@ if [ -z "$JOIN_CODE" ]; then
   echo "└─────────────────────────────────────────┘"
   echo ""
 
-  python3 scripts/download_shard.py \
+  DL_OUT=$(python3 scripts/download_shard.py \
     --repo "$MODEL" \
     --layer-start 0 --layer-end $HALF --total-layers $TOTAL_LAYERS \
-    --out "$WEIGHTS"
+    --out "$WEIGHTS")
+  echo "$DL_OUT"
 
-  WEIGHT_FILES="$(ls "$WEIGHTS"/model-*.safetensors 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+  WEIGHT_FILES=$(echo "$DL_OUT" | grep '^SAMHATI_FILES=' | cut -d= -f2-)
   if [ -z "$WEIGHT_FILES" ]; then
-    echo "Error: no weight files found in $WEIGHTS"
+    echo "Error: could not determine weight files from download"
     exit 1
   fi
 
@@ -151,14 +152,15 @@ else
   echo "Connecting via:  ${JOIN_CODE:0:24}..."
   echo ""
 
-  python3 scripts/download_shard.py \
+  DL_OUT=$(python3 scripts/download_shard.py \
     --repo "$MODEL" \
     --layer-start $HALF --layer-end $TOTAL_LAYERS --total-layers $TOTAL_LAYERS \
-    --out "$WEIGHTS"
+    --out "$WEIGHTS")
+  echo "$DL_OUT"
 
-  WEIGHT_FILES="$(ls "$WEIGHTS"/model-*.safetensors 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+  WEIGHT_FILES=$(echo "$DL_OUT" | grep '^SAMHATI_FILES=' | cut -d= -f2-)
   if [ -z "$WEIGHT_FILES" ]; then
-    echo "Error: no weight files found in $WEIGHTS"
+    echo "Error: could not determine weight files from download"
     exit 1
   fi
 

@@ -102,6 +102,9 @@ def main():
 
     download_files(args.repo, files, args.out)
     print(f"\nDone! Weights saved to: {args.out}")
+    # Machine-readable file list for shell scripts — printed last so it's easy to grep.
+    abs_paths = ",".join(os.path.join(args.out, f) for f in files)
+    print(f"SAMHATI_FILES={abs_paths}")
     print(f"\nNow run:")
     model_path = ",".join(os.path.join(args.out, f) for f in files)
     print(f"""
