@@ -1995,7 +1995,7 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
         let shard_hash   = get_arg(args, "--shard-hash");
 
         if model_path.is_some() || (store_path.is_some() && shard_hash.is_some()) {
-            use inference_coordinator::{LlamaShard, LlamaShardConfig};
+            use inference_coordinator::LlamaShardConfig;
 
             let layer_start = get_arg(args, "--layer-start")
                 .and_then(|v| v.parse::<usize>().ok())
@@ -2039,12 +2039,14 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
             };
 
             let server = if let (Some(sp), Some(hh)) = (store_path, shard_hash) {
+                // ── Load from pre-cached ShardStore ──────────────────────────
                 println!("loading shard layers {}..{} from store {} hash {} ...",
                     layer_start, layer_end, sp, hh);
                 let store = shard_store::ShardStore::open(&sp)?;
                 let hash  = shard_store::Hash::from_hex(&hh)?;
                 InferenceServer::new_from_store(&store, &hash, shard_config, kv_ttl)?
             } else {
+                // ── Load from disk; optionally populate ShardStore ───────────
                 let mp = model_path.unwrap();
                 let weight_files: Vec<String> = mp
                     .split(',')
@@ -2052,7 +2054,37 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
                     .collect();
                 println!("loading shard layers {}..{} from {:?} ...",
                     layer_start, layer_end, weight_files);
-                let shard = LlamaShard::load_wgpu(&weight_files, shard_config)?;
+
+                // Read all weight files into memory once.
+                let bytes_vec: Vec<Vec<u8>> = weight_files
+                    .iter()
+                    .map(|p| std::fs::read(p))
+                    .collect::<std::io::Result<_>>()?;
+
+                // If --store-path is given without --shard-hash, populate the
+                // ShardStore so the next startup can use --shard-hash instead of
+                // reading from disk.  Prints the hash for each file.
+                if let Some(sp) = get_arg(args, "--store-path") {
+                    let store = shard_store::ShardStore::open(&sp)?;
+                    for (i, file_bytes) in bytes_vec.iter().enumerate() {
+                        let hash = store.add_shard(
+                            file_bytes,
+                            &format!("layers_{layer_start}_{layer_end}"),
+                            layer_start as u32,
+                            layer_end as u32,
+                        )?;
+                        println!(
+                            "  [shard cache] file[{i}] → store={sp} hash={hash}"
+                        );
+                        println!(
+                            "  hint: next time use: --store-path {sp} --shard-hash {hash}"
+                        );
+                    }
+                }
+
+                // Load the shard from in-memory bytes (no second disk read).
+                use inference_coordinator::llm_shard::LlamaShard as LS;
+                let shard = LS::load_from_bytes_multi_wgpu(bytes_vec, shard_config)?;
                 InferenceServer::new(shard, kv_ttl)
             };
             println!("shard loaded — serving on {node_id}");
@@ -2148,7 +2180,7 @@ fn print_usage() {
     println!("mesh-node dist-run --peers id1,id2 --models models.json --model stablelm-3b-4e1t [--input \"Hello\"] [--executor echo|burn|iroh|swarm] [--max-retries 2]");
     println!("  iroh executor:  --peers id1,id2 --max-retries 2");
     println!("  swarm executor: --topic <64-hex> --bootstrap <endpoint_id> [--discover-secs 5] [--layers-per-shard 16] [--max-retries 2]");
-    println!("mesh-node serve [--model-path /path/to/model.safetensors --layer-start 0 --layer-end 16 --total-layers 32 --hidden 4096 --intermediate 11008 --vocab 32000 --heads 32 --kv-heads 32 --rope-theta 10000] [--kv-ttl-secs 300]");
+    println!("mesh-node serve [--model-path /path.safetensors,/path2.safetensors --store-path ./cache  (loads from disk; adds to ShardStore)] [--store-path ./cache --shard-hash <hex>  (loads from cache)] [--layer-start 0 --layer-end 16 --total-layers 32 --hidden 4096 --intermediate 11008 --vocab 32000 --heads 32 --kv-heads 32 --rope-theta 10000] [--kv-ttl-secs 300]");
     println!("mesh-node simulate --config <path> [--params-b 117] [--quant 4] [--seq 8192] [--batch 1] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--peers peers.json] [--rtt-samples rtt.json]");
     println!("mesh-node gossip --topic <64-hex> [--bootstrap <endpoint_id> ...] [--interval 10] [--rtt-probe] [--rtt-timeout-ms 3000] [--peer-ttl-ms 15000] [--peer-fail-threshold 3] [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000] [--load-penalty 0.05] [--load-decay 0.9] [--config config.json] [--params-b 117] [--model-name primary] [--models models.json] [--fallback-model name:/path/to/config.json:params_b] [--min-nodes 2] [--max-nodes 6] [--min-bw 500] [--free-vram 48] [--reserve-gb 4] [--safety-factor 0.7] [--min-inference-gb 6] [--role inference|routing|cache] [--state-dir state] [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8] [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]");
     println!("mesh-node infer-http --api-base http://127.0.0.1:8000/v1 --model gpt-oss-20b --prompt \"Hello\" [--system \"You are ...\"] [--max-tokens 128] [--temperature 0.2] [--api-key sk-...]");
