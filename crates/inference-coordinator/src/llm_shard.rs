@@ -110,30 +110,47 @@ fn f16_to_f32(bits: u16) -> f32 {
 /// HuggingFace models commonly store weights in BF16 or F16.  This function
 /// normalises all three to f32 so the rest of the loading pipeline is
 /// dtype-agnostic.
+///
+/// We derive bytes-per-element from the actual data length vs. the shape
+/// product rather than trusting the safetensors dtype field, which can be
+/// inconsistent in some checkpoints (e.g. Qwen2.5 embed_tokens reports F32
+/// but the data is BF16-sized).
 fn load_f32(view: &safetensors::tensor::TensorView<'_>) -> Vec<f32> {
     use safetensors::Dtype;
-    match view.dtype() {
-        Dtype::F32 => view
-            .data()
+    let data = view.data();
+    let shape_elems: usize = view.shape().iter().product::<usize>().max(1);
+    // Derive actual bytes-per-element from data size; fall back to dtype if ambiguous.
+    let bpe = if data.len() % shape_elems == 0 {
+        data.len() / shape_elems
+    } else {
+        // Shouldn't happen with valid safetensors, but fall back to dtype.
+        match view.dtype() {
+            Dtype::F32 => 4,
+            _ => 2,
+        }
+    };
+    match bpe {
+        4 => data
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
             .collect(),
-        Dtype::BF16 => view
-            .data()
-            .chunks_exact(2)
-            .map(|b| {
-                // BF16 = top 16 bits of f32; zero-extend to get an f32.
-                let bits = u16::from_le_bytes(b.try_into().unwrap());
-                f32::from_bits((bits as u32) << 16)
-            })
-            .collect(),
-        Dtype::F16 => view
-            .data()
-            .chunks_exact(2)
-            .map(|b| f16_to_f32(u16::from_le_bytes(b.try_into().unwrap())))
-            .collect(),
-        dt => panic!(
-            "unsupported tensor dtype {dt:?}: only F32, BF16, and F16 are supported"
+        2 => match view.dtype() {
+            Dtype::F16 => data
+                .chunks_exact(2)
+                .map(|b| f16_to_f32(u16::from_le_bytes(b.try_into().unwrap())))
+                .collect(),
+            _ => data
+                .chunks_exact(2)
+                .map(|b| {
+                    // BF16 = top 16 bits of f32; zero-extend to get an f32.
+                    let bits = u16::from_le_bytes(b.try_into().unwrap());
+                    f32::from_bits((bits as u32) << 16)
+                })
+                .collect(),
+        },
+        bpe => panic!(
+            "tensor dtype={:?} shape={:?} has unsupported bytes/element ({bpe}); data_len={}",
+            view.dtype(), view.shape(), data.len()
         ),
     }
 }

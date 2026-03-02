@@ -2118,6 +2118,10 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
 /// Joins a gossip topic (if `topic_hex` is Some) and broadcasts a `CapabilityPayload`
 /// every `interval_secs` seconds until Ctrl-C.
 ///
+/// Also receives announcements from other nodes in the topic, prints a peer-count
+/// line whenever a new peer is seen, and optionally appends each new peer's node_id
+/// to `--peer-file <path>` so that shell scripts can watch for connections.
+///
 /// When no topic is provided the function just waits for Ctrl-C so `cmd_serve` has a
 /// single unified exit point.
 async fn run_gossip_announce_loop(
@@ -2128,6 +2132,8 @@ async fn run_gossip_announce_loop(
     gossip_opt: Option<Gossip>,
     interval_secs: u64,
 ) -> Result<()> {
+    let peer_file: Option<String> = get_arg(args, "--peer-file");
+
     // No gossip — just wait for Ctrl-C.
     let (topic_hex, gossip) = match (topic_hex, gossip_opt) {
         (Some(th), Some(g)) => (th, g),
@@ -2141,10 +2147,10 @@ async fn run_gossip_announce_loop(
     };
 
     let topic = parse_topic_id(&topic_hex)?;
-    let (sender, _) = gossip.subscribe(topic, bootstrap_ids).await?.split();
+    let (sender, mut recv) = gossip.subscribe(topic, bootstrap_ids).await?.split();
 
     // Build capability payload once (static for this process lifetime).
-    let (caps, _) = capability_from_args(args, node_id);
+    let (caps, _) = capability_from_args(args, node_id.clone());
     let init_msg = format!("cap:{}", serde_json::to_string(&caps)?);
     if let Err(e) = sender.broadcast(init_msg.into_bytes().into()).await {
         eprintln!("initial gossip broadcast error: {e}");
@@ -2152,6 +2158,7 @@ async fn run_gossip_announce_loop(
     println!("announcing on gossip topic {topic_hex} every {interval_secs}s");
     println!("press Ctrl-C to stop");
 
+    let mut seen_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Use a pinned Ctrl-C future so a signal is never missed between ticks.
     let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
     tick.tick().await; // skip the immediate first tick (already broadcast above)
@@ -2165,6 +2172,35 @@ async fn run_gossip_announce_loop(
                 let m = format!("cap:{}", serde_json::to_string(&caps).unwrap_or_default());
                 if let Err(e) = sender.broadcast(m.into_bytes().into()).await {
                     eprintln!("gossip broadcast error: {e}");
+                }
+            }
+            event_opt = recv.next() => {
+                if let Some(Ok(Event::Received(msg))) = event_opt {
+                    let body = String::from_utf8_lossy(&msg.content);
+                    if let Some(json_str) = body.strip_prefix("cap:") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                            if let Some(pid) = v["node_id"].as_str() {
+                                let pid = pid.to_string();
+                                if pid != node_id && seen_peers.insert(pid.clone()) {
+                                    println!(
+                                        "  peer joined: {}...  ({} peer(s) in network)",
+                                        &pid[..pid.len().min(16)],
+                                        seen_peers.len()
+                                    );
+                                    if let Some(ref pf) = peer_file {
+                                        let _ = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(pf)
+                                            .and_then(|mut f| {
+                                                use std::io::Write;
+                                                writeln!(f, "{pid}")
+                                            });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
