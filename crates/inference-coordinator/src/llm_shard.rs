@@ -544,6 +544,9 @@ impl<B: Backend> LlamaShard<B> {
                 let st = safetensors::SafeTensors::deserialize(bytes)
                     .map_err(|e| anyhow!("safetensors deserialize: {e:?}"))?;
                 if let Ok(view) = st.tensor(tensor_name) {
+                    let elems = view.shape().iter().product::<usize>();
+                    eprintln!("  [dbg] {tensor_name}: shape={:?} dtype={:?} data_bytes={}  → {} elems",
+                        view.shape(), view.dtype(), view.data().len(), elems);
                     return Ok(load_f32(&view));
                 }
             }

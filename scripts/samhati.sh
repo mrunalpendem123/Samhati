@@ -24,11 +24,9 @@ ARCH_ARGS="--hidden 2048 --intermediate 11008 --heads 16 --kv-heads 2 \
 
 JOIN_CODE="${1:-}"
 
-# ── 1. Build binary if not present ──────────────────────────────────────────
-if [ ! -f target/release/mesh-node ]; then
-  echo "Building Samhati (first time only, takes ~5 min)..."
-  cargo build --release --features burn
-fi
+# ── 1. Build (always, so code changes take effect) ──────────────────────────
+echo "Building Samhati..."
+cargo build --release --features burn 2>&1 | grep -E "^(error|warning\[|Compiling mesh-node|Finished)" || true
 
 if [ -z "$JOIN_CODE" ]; then
   # ════════════════════════════════════════════════════════════════════════════
