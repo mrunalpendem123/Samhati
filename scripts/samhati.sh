@@ -53,8 +53,8 @@ if [ -z "$JOIN_CODE" ]; then
     exit 1
   fi
 
-  SERVE_LOG=$(mktemp /tmp/samhati-serve-XXXXXX.log)
-  PEER_FILE=$(mktemp /tmp/samhati-peers-XXXXXX.txt)
+  SERVE_LOG=$(mktemp -t samhati-serve)
+  PEER_FILE=$(mktemp -t samhati-peers)
   trap "kill \$SERVE_PID 2>/dev/null; rm -f '$SERVE_LOG' '$PEER_FILE'" EXIT
 
   eval ./target/release/mesh-node serve \
