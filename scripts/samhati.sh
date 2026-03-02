@@ -11,16 +11,16 @@
 set -e
 cd "$(dirname "$0")/.."
 
-MODEL=Qwen/Qwen2.5-7B
+MODEL=Qwen/Qwen2.5-1.5B
 TOTAL_LAYERS=28
-WEIGHTS=~/qwen25-7b
+WEIGHTS=~/qwen25-1b5
 
 # Fixed gossip topic for this model network.
 # Everyone on this topic is running the same model split.
-TOPIC="73616d6861746976317177656e322e352d37422d676f7373697020746f706963"
+TOPIC="73616d6861746976317177656e322e352d31422e352d676f737369707461706963"
 
-ARCH_ARGS="--hidden 3584 --intermediate 18944 --heads 28 --kv-heads 4 \
-  --vocab 152064 --rope-theta 1000000 --rms-eps 0.000001"
+ARCH_ARGS="--hidden 1536 --intermediate 8960 --heads 12 --kv-heads 2 \
+  --vocab 151936 --rope-theta 1000000 --rms-eps 0.000001"
 
 JOIN_CODE="${1:-}"
 
