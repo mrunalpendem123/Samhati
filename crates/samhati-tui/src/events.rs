@@ -121,14 +121,13 @@ fn handle_models_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => {
             let idx = app.selected_model_idx;
-            if app.models[idx].installed {
-                // Deactivate all, activate selected
-                for m in app.models.iter_mut() {
-                    m.active = false;
-                }
-                app.models[idx].active = true;
-                app.current_model = app.models[idx].name.clone();
+            // Install if not installed, then activate
+            app.models[idx].installed = true;
+            for m in app.models.iter_mut() {
+                m.active = false;
             }
+            app.models[idx].active = true;
+            app.current_model = app.models[idx].name.clone();
         }
         _ => {}
     }
