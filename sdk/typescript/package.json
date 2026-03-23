@@ -1,0 +1,21 @@
+{
+  "name": "samhati",
+  "version": "0.1.0",
+  "description": "OpenAI-compatible SDK for the Samhati decentralized AI network",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0",
+    "msw": "^2.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}

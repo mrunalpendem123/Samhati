@@ -1,0 +1,16 @@
+base_model: "Qwen/Qwen2.5-3B"
+method: "qlora"
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+training:
+  epochs: 3
+  learning_rate: 2e-4
+  batch_size: 4
+  gradient_accumulation: 8
+  warmup_ratio: 0.03
+  max_seq_length: 2048
+  bf16: true
+  scheduler: "cosine"

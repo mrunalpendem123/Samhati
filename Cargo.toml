@@ -9,5 +9,10 @@ members = [
   "crates/samhati-swarm",
   "crates/samhati-ranking",
   "crates/samhati-toploc",
+  "sdk/rust",
+]
+exclude = [
+  "programs/samhati-protocol",
+  "app-tauri",
 ]
 resolver = "2"

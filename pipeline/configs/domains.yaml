@@ -1,0 +1,31 @@
+domains:
+  hindi:
+    description: "Hindi language specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["hindi", "हिंदी", "devanagari"]
+    min_examples: 5000
+  code-rust:
+    description: "Rust programming specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["rust", "cargo", "fn ", "impl ", "trait "]
+    min_examples: 3000
+  code-python:
+    description: "Python programming specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["python", "def ", "import ", "pip"]
+    min_examples: 3000
+  math:
+    description: "Mathematics specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["prove", "theorem", "integral", "equation", "solve"]
+    min_examples: 5000
+  science:
+    description: "Science specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["hypothesis", "experiment", "molecular", "quantum"]
+    min_examples: 5000
+  defi:
+    description: "DeFi/blockchain specialist"
+    base_model: "Qwen/Qwen2.5-3B"
+    keywords: ["solana", "ethereum", "defi", "smart contract", "token"]
+    min_examples: 3000

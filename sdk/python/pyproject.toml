@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "samhati"
+version = "0.1.0"
+description = "OpenAI-compatible SDK for the Samhati decentralized AI network"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Samhati Contributors" }]
+dependencies = ["httpx>=0.25.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "respx>=0.21"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["samhati"]
