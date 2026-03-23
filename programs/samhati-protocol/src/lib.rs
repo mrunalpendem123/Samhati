@@ -6,7 +6,7 @@ pub mod state;
 
 use instructions::*;
 
-declare_id!("SAMHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+declare_id!("AB7cSMLv1J7J28DKLMbzo2tyNp1kZSmE67a6Heoa5Mkr");
 
 #[program]
 pub mod samhati_protocol {
