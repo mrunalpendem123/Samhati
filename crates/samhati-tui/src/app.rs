@@ -79,6 +79,26 @@ pub struct TxEntry {
     pub status: String,
 }
 
+/// Display info for a swarm node shown on the dashboard.
+#[derive(Debug, Clone)]
+pub struct SwarmNodeDisplay {
+    pub id: String,
+    pub url: String,
+    pub model: String,
+    pub elo: i32,
+    pub rounds: u64,
+    pub wins: u64,
+}
+
+/// Summary of the last swarm round for display.
+#[derive(Debug, Clone)]
+pub struct SwarmRoundDisplay {
+    pub winner: String,
+    pub confidence: f32,
+    pub n_nodes: usize,
+    pub total_time_ms: u64,
+}
+
 pub struct App {
     pub tab: Tab,
     pub running: bool,
@@ -117,6 +137,10 @@ pub struct App {
     pub download_progress: Option<f64>, // None = not downloading, Some(0-100) = progress
     pub download_status: String,        // "Downloading Qwen2.5-3B... 45%"
     pub node_error: String,             // error messages from node start
+
+    // Swarm state
+    pub swarm_nodes: Vec<SwarmNodeDisplay>,
+    pub last_round_result: Option<SwarmRoundDisplay>,
 
     // Settings
     pub api_endpoint: String,
@@ -169,6 +193,9 @@ impl App {
             download_progress: None,
             download_status: String::new(),
             node_error: String::new(),
+
+            swarm_nodes: Vec::new(),
+            last_round_result: None,
 
             api_endpoint: "http://localhost:8000".into(),
             max_vram_gb: 24.0,

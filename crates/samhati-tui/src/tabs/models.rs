@@ -190,6 +190,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Span::styled("select  ", Style::default().fg(Color::DarkGray)),
         Span::styled(" Enter ", Style::default().fg(PURPLE).bold()),
         Span::styled("download & activate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" s ", Style::default().fg(PURPLE).bold()),
+        Span::styled("add to swarm  ", Style::default().fg(Color::DarkGray)),
         Span::styled(" ★ ", Style::default().fg(Color::Cyan).bold()),
         Span::styled("= fits your RAM  ", Style::default().fg(Color::DarkGray)),
         Span::styled(" 1.5x+ ", Style::default().fg(Color::Green).bold()),

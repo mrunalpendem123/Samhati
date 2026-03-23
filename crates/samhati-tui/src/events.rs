@@ -54,6 +54,7 @@ pub enum ChatAction {
     SendMessage(String),
     RequestAirdrop,
     SelectModel(usize),
+    AddSwarmNode(usize), // Start model on next available port and add to swarm
 }
 
 fn handle_chat_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
@@ -124,6 +125,14 @@ fn handle_models_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
             }
             let idx = app.selected_model_idx;
             return Some(ChatAction::SelectModel(idx));
+        }
+        KeyCode::Char('s') => {
+            // Add model to swarm on next available port
+            if app.download_progress.is_some() {
+                return None;
+            }
+            let idx = app.selected_model_idx;
+            return Some(ChatAction::AddSwarmNode(idx));
         }
         _ => {}
     }

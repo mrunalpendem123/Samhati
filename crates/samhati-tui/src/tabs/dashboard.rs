@@ -5,16 +5,38 @@ use crate::app::App;
 use crate::ui::{BG, DIM_PURPLE, PURPLE, SURFACE};
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
-    let layout = Layout::vertical([
-        Constraint::Length(7),  // ELO hero + sparkline
-        Constraint::Length(9),  // stats grid
-        Constraint::Min(1),     // node info
-    ])
-    .split(area);
+    let has_swarm = !app.swarm_nodes.is_empty();
+    let layout = if has_swarm {
+        Layout::vertical([
+            Constraint::Length(7),  // ELO hero + sparkline
+            Constraint::Length(9),  // stats grid
+            Constraint::Min(1),     // swarm nodes + node info
+        ])
+        .split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Length(7),
+            Constraint::Length(9),
+            Constraint::Min(1),
+        ])
+        .split(area)
+    };
 
     draw_elo_section(frame, app, layout[0]);
     draw_stats(frame, app, layout[1]);
-    draw_node_info(frame, app, layout[2]);
+
+    if has_swarm {
+        let bottom = Layout::vertical([
+            Constraint::Min(1),    // swarm table
+            Constraint::Length(6), // node info
+        ])
+        .split(layout[2]);
+
+        draw_swarm_nodes(frame, app, bottom[0]);
+        draw_node_info(frame, app, bottom[1]);
+    } else {
+        draw_node_info(frame, app, layout[2]);
+    }
 }
 
 fn draw_elo_section(frame: &mut Frame, app: &App, area: Rect) {
@@ -119,6 +141,83 @@ fn render_stat(frame: &mut Frame, label: &str, value: &str, color: Color, area: 
     ];
     let p = Paragraph::new(text).alignment(Alignment::Center);
     frame.render_widget(p, area);
+}
+
+fn draw_swarm_nodes(frame: &mut Frame, app: &App, area: Rect) {
+    let header = Row::new(vec![
+        Cell::from("Node ID").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Model").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("ELO").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Rounds").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Wins").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Win %").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("URL").style(Style::default().fg(PURPLE).bold()),
+    ])
+    .height(1)
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .swarm_nodes
+        .iter()
+        .map(|n| {
+            let win_pct = if n.rounds > 0 {
+                format!("{:.0}%", (n.wins as f64 / n.rounds as f64) * 100.0)
+            } else {
+                "-".into()
+            };
+            let elo_color = if n.elo >= 1550 {
+                Color::Green
+            } else if n.elo >= 1450 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            Row::new(vec![
+                Cell::from(n.id.clone()).style(Style::default().fg(Color::White)),
+                Cell::from(n.model.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(format!("{}", n.elo)).style(Style::default().fg(elo_color).bold()),
+                Cell::from(format!("{}", n.rounds)).style(Style::default().fg(Color::White)),
+                Cell::from(format!("{}", n.wins)).style(Style::default().fg(Color::Green)),
+                Cell::from(win_pct).style(Style::default().fg(Color::White)),
+                Cell::from(n.url.clone()).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(16),
+        Constraint::Percentage(20),
+        Constraint::Percentage(10),
+        Constraint::Percentage(10),
+        Constraint::Percentage(10),
+        Constraint::Percentage(10),
+        Constraint::Percentage(24),
+    ];
+
+    let mut title_text = format!(" Swarm Nodes ({}) ", app.swarm_nodes.len());
+    if let Some(ref round) = app.last_round_result {
+        title_text = format!(
+            " Swarm Nodes ({}) | Last: {} won {:.0}% conf {}ms ",
+            app.swarm_nodes.len(),
+            round.winner,
+            round.confidence * 100.0,
+            round.total_time_ms,
+        );
+    }
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::bordered()
+                .title(Span::styled(
+                    title_text,
+                    Style::default().fg(PURPLE).bold(),
+                ))
+                .border_style(Style::default().fg(DIM_PURPLE))
+                .style(Style::default().bg(BG)),
+        );
+
+    frame.render_widget(table, area);
 }
 
 fn draw_node_info(frame: &mut Frame, app: &App, area: Rect) {

@@ -3,6 +3,7 @@ mod api;
 mod events;
 mod model_download;
 mod node_runner;
+mod swarm;
 mod tabs;
 mod ui;
 mod wallet;
@@ -20,11 +21,12 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
-use app::{App, ChatMessage};
+use app::{App, ChatMessage, SwarmNodeDisplay, SwarmRoundDisplay};
 use api::ApiClient;
 use events::{ChatAction, handle_key, poll_event};
 use model_download::ModelDownloader;
-use node_runner::NodeRunner;
+use node_runner::{NodeRunner, MultiNodeRunner};
+use swarm::SwarmOrchestrator;
 use wallet::SolanaWallet;
 
 fn main() -> Result<()> {
@@ -54,11 +56,14 @@ fn main() -> Result<()> {
 
     let downloader = ModelDownloader::new();
     let mut node_runner = NodeRunner::new();
+    let mut multi_runner = MultiNodeRunner::new();
+    let swarm = Arc::new(SwarmOrchestrator::new());
 
     let tick_rate = Duration::from_millis(33);
 
     // Pending async tasks
     let mut pending_chat: Option<tokio::task::JoinHandle<Result<api::ChatResponse>>> = None;
+    let mut pending_swarm: Option<tokio::task::JoinHandle<Result<swarm::SwarmRoundResult>>> = None;
     let mut pending_balance: Option<tokio::task::JoinHandle<Result<f64>>> = None;
     let mut pending_txs: Option<tokio::task::JoinHandle<Result<Vec<wallet::TxInfo>>>> = None;
     let mut pending_health: Option<tokio::task::JoinHandle<Result<bool>>> = None;
@@ -110,6 +115,7 @@ fn main() -> Result<()> {
         check_health(&rt, &mut pending_health, &mut app);
         check_txs(&rt, &mut pending_txs, &mut app);
         check_chat(&rt, &mut pending_chat, &mut app);
+        check_swarm(&rt, &mut pending_swarm, &mut app);
         check_airdrop(&rt, &mut pending_airdrop, &mut app);
 
         // Update download progress from shared state
@@ -140,11 +146,20 @@ fn main() -> Result<()> {
                     if let Some(action) = handle_key(&mut app, key) {
                         match action {
                             ChatAction::SendMessage(msg) => {
-                                let client = ApiClient::new(&app.api_endpoint);
-                                let model = app.current_model.clone();
-                                pending_chat = Some(rt.spawn(async move {
-                                    client.chat(&msg, &model).await
-                                }));
+                                if swarm.node_count() > 0 {
+                                    // Use swarm inference (multi-node BradleyTerry)
+                                    let s = Arc::clone(&swarm);
+                                    pending_swarm = Some(rt.spawn(async move {
+                                        s.infer(&msg).await
+                                    }));
+                                } else {
+                                    // Fallback to single node
+                                    let client = ApiClient::new(&app.api_endpoint);
+                                    let model = app.current_model.clone();
+                                    pending_chat = Some(rt.spawn(async move {
+                                        client.chat(&msg, &model).await
+                                    }));
+                                }
                             }
                             ChatAction::RequestAirdrop => {
                                 if let Some(ref w) = app.wallet {
@@ -190,6 +205,41 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
+                            ChatAction::AddSwarmNode(idx) => {
+                                let model_name = app.models[idx].name.clone();
+                                if downloader.is_downloaded(&model_name) {
+                                    let path = downloader.model_path(&model_name);
+                                    match multi_runner.start_node(&model_name, &path) {
+                                        Ok(port) => {
+                                            let node_id = format!("node-{}", port);
+                                            let url = format!("http://127.0.0.1:{}", port);
+                                            swarm.add_node(node_id.clone(), url.clone(), model_name.clone());
+                                            app.swarm_nodes.push(SwarmNodeDisplay {
+                                                id: node_id,
+                                                url,
+                                                model: model_name.clone(),
+                                                elo: 1500,
+                                                rounds: 0,
+                                                wins: 0,
+                                            });
+                                            app.peers_connected = swarm.node_count() as u32;
+                                            app.download_status = format!(
+                                                "{} added to swarm on port {} ({} nodes total)",
+                                                model_name, port, swarm.node_count()
+                                            );
+                                            app.node_error.clear();
+                                        }
+                                        Err(e) => {
+                                            app.node_error = format!("Swarm node failed: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    app.node_error = format!(
+                                        "Download {} first (Enter) before adding to swarm (s)",
+                                        model_name
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -197,8 +247,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Stop the node runner before exiting
+    // Stop all node runners before exiting
     node_runner.stop();
+    multi_runner.stop_all();
 
     // Restore terminal
     disable_raw_mode()?;
@@ -332,6 +383,91 @@ fn check_txs(
                         }
                     })
                     .collect();
+            }
+        }
+    }
+}
+
+fn check_swarm(
+    rt: &tokio::runtime::Runtime,
+    pending: &mut Option<tokio::task::JoinHandle<Result<swarm::SwarmRoundResult>>>,
+    app: &mut App,
+) {
+    if let Some(handle) = pending.as_ref() {
+        if handle.is_finished() {
+            let handle = pending.take().unwrap();
+            match rt.block_on(handle) {
+                Ok(Ok(result)) => {
+                    // Build assistant message with swarm metadata
+                    let meta = format!(
+                        "[Swarm: {} won | {:.0}% confidence | {} nodes | {}ms]",
+                        result.winner_id,
+                        result.confidence * 100.0,
+                        result.n_nodes,
+                        result.total_time_ms,
+                    );
+                    let content = format!("{}\n\n{}", result.winning_answer, meta);
+
+                    app.chat_messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content,
+                        timestamp: chrono::Local::now().format("%H:%M").to_string(),
+                        confidence: Some(result.confidence),
+                        n_nodes: Some(result.n_nodes),
+                    });
+
+                    // Update app-level ELO to winner's ELO
+                    if let Some((_, new_elo)) = result.elo_updates.iter().find(|(id, _)| *id == result.winner_id) {
+                        app.elo_score = *new_elo;
+                        app.elo_history.push(*new_elo as u64);
+                        if app.elo_history.len() > 20 {
+                            app.elo_history.remove(0);
+                        }
+                    }
+
+                    app.inferences_served += 1;
+
+                    // Update swarm node display
+                    for (id, new_elo) in &result.elo_updates {
+                        if let Some(sn) = app.swarm_nodes.iter_mut().find(|n| n.id == *id) {
+                            sn.elo = *new_elo;
+                            sn.rounds += 1;
+                            if *id == result.winner_id {
+                                sn.wins += 1;
+                            }
+                        }
+                    }
+
+                    // Store last round for dashboard
+                    app.last_round_result = Some(SwarmRoundDisplay {
+                        winner: result.winner_id,
+                        confidence: result.confidence,
+                        n_nodes: result.n_nodes,
+                        total_time_ms: result.total_time_ms,
+                    });
+
+                    app.chat_loading = false;
+                }
+                Ok(Err(e)) => {
+                    app.chat_messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: format!("Swarm error: {}", e),
+                        timestamp: chrono::Local::now().format("%H:%M").to_string(),
+                        confidence: None,
+                        n_nodes: None,
+                    });
+                    app.chat_loading = false;
+                }
+                Err(e) => {
+                    app.chat_messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: format!("Swarm task error: {}", e),
+                        timestamp: chrono::Local::now().format("%H:%M").to_string(),
+                        confidence: None,
+                        n_nodes: None,
+                    });
+                    app.chat_loading = false;
+                }
             }
         }
     }
