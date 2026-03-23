@@ -1,0 +1,17 @@
+[package]
+name = "samhati-toploc"
+version = "0.1.0"
+edition = "2021"
+description = "TOPLOC (Token-Level Proof of Compute) — cryptographic verification that a node ran real inference"
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+[dev-dependencies]
+rand = "0.8"
