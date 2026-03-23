@@ -85,21 +85,7 @@ impl NodeRunner {
         match child {
             Ok(c) => {
                 self.child = Some(c);
-                // Wait for server to be ready (poll health endpoint)
-                let port = self.port;
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    if let Ok(resp) = reqwest::blocking::Client::new()
-                        .get(format!("http://127.0.0.1:{}/health", port))
-                        .timeout(std::time::Duration::from_secs(1))
-                        .send()
-                    {
-                        if resp.status().is_success() {
-                            return Ok(());
-                        }
-                    }
-                }
-                Ok(()) // server started but may still be loading
+                Ok(()) // server starts in background, health checked by main loop
             }
             Err(e) => Err(anyhow::anyhow!(
                 "Failed to start inference server. Install llama.cpp: brew install llama.cpp\nError: {}",
@@ -209,20 +195,7 @@ impl MultiNodeRunner {
         match child {
             Ok(c) => {
                 self.nodes.push((port, model_name.to_string(), c));
-                // Wait for health check
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    if let Ok(resp) = reqwest::blocking::Client::new()
-                        .get(format!("http://127.0.0.1:{}/health", port))
-                        .timeout(std::time::Duration::from_secs(1))
-                        .send()
-                    {
-                        if resp.status().is_success() {
-                            return Ok(port);
-                        }
-                    }
-                }
-                Ok(port) // started but may still be loading
+                Ok(port) // server starts in background, no blocking
             }
             Err(e) => Err(anyhow::anyhow!(
                 "Failed to start node on port {}. Install llama.cpp: brew install llama.cpp\nError: {}",
