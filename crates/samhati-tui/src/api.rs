@@ -116,11 +116,15 @@ impl ApiClient {
             .into_iter()
             .map(|m| ModelInfo {
                 name: m.id,
+                params: String::new(),
+                quant: "Q4_K_M".into(),
                 domain: m.domain.unwrap_or_else(|| "General".into()),
                 size_gb: m.size_gb.unwrap_or(0.0),
+                min_ram_gb: m.size_gb.unwrap_or(0.0) * 2.0,
                 smti_bonus: m.smti_bonus.unwrap_or_else(|| "1.0x".into()),
                 installed: m.installed.unwrap_or(false),
                 active: m.active.unwrap_or(false),
+                recommended: false,
             })
             .collect())
     }

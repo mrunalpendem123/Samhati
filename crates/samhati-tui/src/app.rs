@@ -1,4 +1,5 @@
 use chrono::Local;
+use sysinfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -61,9 +62,13 @@ pub struct ModelInfo {
     pub name: String,
     pub domain: String,
     pub size_gb: f32,
+    pub params: String,      // e.g. "1.5B", "3B", "7B"
+    pub quant: String,       // e.g. "Q4_K_M", "Q8_0", "F16"
     pub smti_bonus: String,
+    pub min_ram_gb: f32,     // minimum RAM to run
     pub installed: bool,
     pub active: bool,
+    pub recommended: bool,   // auto-detected as good fit for this device
 }
 
 #[derive(Debug, Clone)]
@@ -138,51 +143,10 @@ impl App {
             inferences_served: 1_284,
             uptime_secs: 14_832,
             peers_connected: 7,
-            current_model: "LLaMA-3.3-70B".into(),
+            current_model: "Qwen2.5-3B".into(),
             elo_history: vec![1480, 1495, 1502, 1510, 1498, 1520, 1535, 1542, 1538, 1547],
 
-            models: vec![
-                ModelInfo {
-                    name: "LLaMA-3.3-70B".into(),
-                    domain: "General".into(),
-                    size_gb: 38.5,
-                    smti_bonus: "1.5x".into(),
-                    installed: true,
-                    active: true,
-                },
-                ModelInfo {
-                    name: "Mistral-7B-v0.3".into(),
-                    domain: "General".into(),
-                    size_gb: 4.1,
-                    smti_bonus: "1.0x".into(),
-                    installed: true,
-                    active: false,
-                },
-                ModelInfo {
-                    name: "DeepSeek-R1-Distill-32B".into(),
-                    domain: "Reasoning".into(),
-                    size_gb: 18.2,
-                    smti_bonus: "1.8x".into(),
-                    installed: false,
-                    active: false,
-                },
-                ModelInfo {
-                    name: "Qwen-2.5-Coder-14B".into(),
-                    domain: "Code".into(),
-                    size_gb: 8.7,
-                    smti_bonus: "1.3x".into(),
-                    installed: false,
-                    active: false,
-                },
-                ModelInfo {
-                    name: "BioMistral-7B".into(),
-                    domain: "Medical".into(),
-                    size_gb: 4.1,
-                    smti_bonus: "2.0x".into(),
-                    installed: false,
-                    active: false,
-                },
-            ],
+            models: detect_models(),
             selected_model_idx: 0,
 
             wallet_pubkey: "smti1q7x8...k4f2m9".into(),
@@ -232,5 +196,96 @@ impl App {
         let h = self.uptime_secs / 3600;
         let m = (self.uptime_secs % 3600) / 60;
         format!("{}h {}m", h, m)
+    }
+}
+
+/// Auto-detect available RAM and recommend models that fit this device.
+/// Follows the whitepaper's cascade: smaller models for low-end devices,
+/// specialist models get domain bonuses (1.5x SMTI).
+fn detect_models() -> Vec<ModelInfo> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total_ram_gb = sys.total_memory() as f64 / 1_073_741_824.0;
+
+    let mut models = vec![
+        // ── Tiny (0.5-1B) — runs on anything ───────────────────────
+        m("Qwen2.5-0.5B", "0.5B", "General", 0.4, 1.0, "1.0x"),
+        m("SmolLM2-1.7B", "1.7B", "General", 1.0, 2.0, "1.0x"),
+
+        // ── Small (1.5-3B) — laptops, phones 2022+ ─────────────────
+        m("Qwen2.5-1.5B", "1.5B", "General", 1.0, 2.0, "1.0x"),
+        m("Qwen2.5-3B", "3B", "General", 1.8, 4.0, "1.0x"),
+        m("Llama-3.2-3B", "3B", "General", 1.8, 4.0, "1.0x"),
+        m("Phi-4-mini-3.8B", "3.8B", "Reasoning", 2.2, 4.0, "1.3x"),
+        m("Gemma-3-1B", "1B", "General", 0.7, 2.0, "1.0x"),
+        m("Gemma-3-4B", "4B", "General", 2.5, 6.0, "1.0x"),
+
+        // ── Specialist SLMs (3B, domain-tuned) — whitepaper flywheel ──
+        m("Samhati-Hindi-3B", "3B", "Hindi", 1.8, 4.0, "1.5x"),
+        m("Samhati-Rust-3B", "3B", "Rust", 1.8, 4.0, "1.5x"),
+        m("Samhati-Python-3B", "3B", "Python", 1.8, 4.0, "1.5x"),
+        m("Samhati-Math-3B", "3B", "Math", 1.8, 4.0, "1.5x"),
+        m("Samhati-DeFi-3B", "3B", "DeFi", 1.8, 4.0, "1.5x"),
+        m("Samhati-Science-3B", "3B", "Science", 1.8, 4.0, "1.5x"),
+        m("Samhati-Legal-3B", "3B", "Legal", 1.8, 4.0, "1.5x"),
+
+        // ── Medium (7-8B) — 16GB+ laptops ──────────────────────────
+        m("Qwen2.5-7B", "7B", "General", 4.4, 8.0, "1.0x"),
+        m("Llama-3.1-8B", "8B", "General", 4.7, 8.0, "1.0x"),
+        m("Mistral-7B-v0.3", "7B", "General", 4.1, 8.0, "1.0x"),
+        m("Gemma-3-12B", "12B", "General", 7.0, 12.0, "1.2x"),
+        m("DeepSeek-Coder-V2-Lite", "7B", "Code", 4.4, 8.0, "1.5x"),
+        m("BioMistral-7B", "7B", "Medical", 4.1, 8.0, "2.0x"),
+
+        // ── Large (14-32B) — 32GB+ machines / GPUs ──────────────────
+        m("Qwen2.5-14B", "14B", "General", 8.7, 16.0, "1.3x"),
+        m("Qwen2.5-Coder-14B", "14B", "Code", 8.7, 16.0, "1.5x"),
+        m("DeepSeek-R1-Distill-14B", "14B", "Reasoning", 8.7, 16.0, "1.8x"),
+        m("Gemma-3-27B", "27B", "General", 16.0, 24.0, "1.3x"),
+        m("Qwen2.5-32B", "32B", "General", 18.5, 32.0, "1.5x"),
+
+        // ── XL (70B+) — GPU servers ─────────────────────────────────
+        m("Llama-3.3-70B", "70B", "General", 38.5, 48.0, "1.5x"),
+        m("DeepSeek-R1-Distill-70B", "70B", "Reasoning", 38.5, 48.0, "2.0x"),
+        m("Qwen2.5-72B", "72B", "General", 40.0, 48.0, "1.5x"),
+    ];
+
+    // Auto-detect: mark models that fit in 70% of RAM (leave room for OS)
+    let usable_ram = total_ram_gb * 0.7;
+    for model in &mut models {
+        if (model.min_ram_gb as f64) <= usable_ram {
+            model.recommended = true;
+        }
+    }
+
+    // Auto-select: find the best 3B general model as default active
+    for model in &mut models {
+        if model.name == "Qwen2.5-3B" && model.recommended {
+            model.active = true;
+            model.installed = true;
+        }
+    }
+
+    // Also mark largest fitting model as installed
+    let mut best_idx = None;
+    let mut best_size: f32 = 0.0;
+    for (i, model) in models.iter().enumerate() {
+        if model.recommended && model.size_gb > best_size && !model.active {
+            best_size = model.size_gb;
+            best_idx = Some(i);
+        }
+    }
+    if let Some(idx) = best_idx {
+        models[idx].installed = true;
+    }
+
+    models
+}
+
+fn m(name: &str, params: &str, domain: &str, size_gb: f32, min_ram_gb: f32, bonus: &str) -> ModelInfo {
+    ModelInfo {
+        name: name.into(), params: params.into(), quant: "Q4_K_M".into(),
+        domain: domain.into(), size_gb, min_ram_gb,
+        smti_bonus: bonus.into(), installed: false, active: false, recommended: false,
     }
 }
