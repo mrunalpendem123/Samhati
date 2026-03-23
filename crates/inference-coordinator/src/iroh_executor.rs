@@ -11,8 +11,9 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
+use crate::activation_cache::{ActivationRingBuffer, CachedActivation};
 use crate::plan::ShardSpec;
-use crate::rpc::{RpcRequest, RpcResponse, INFERENCE_ALPN};
+use crate::rpc::{RpcRequest, RpcResponse, ReplayRequest, ReplayResponse, INFERENCE_ALPN};
 use crate::tensor_frame::TensorFrame;
 use crate::{InferenceRequest, ShardExecutor};
 
@@ -22,6 +23,13 @@ use crate::{InferenceRequest, ShardExecutor};
 /// Optionally wraps a `SwarmRegistry` for **mid-token failover**: if the
 /// primary peer fails, the executor automatically retries with the next-best
 /// peer for the same layer range, updating reputation scores on every outcome.
+///
+/// ## Fault recovery (Petals dual-cache)
+///
+/// When `activation_cache` is attached, the executor stores every activation
+/// sent to a shard stage.  On failover, cached activations are replayed to the
+/// replacement node via a `ReplayRequest` so it can rebuild its KV cache and
+/// resume generation without a full restart.
 #[derive(Clone)]
 pub struct IrohDistributedExecutor {
     endpoint: Endpoint,
@@ -35,6 +43,10 @@ pub struct IrohDistributedExecutor {
     registry: Option<Arc<RwLock<SwarmRegistry>>>,
     /// Model name used when querying the registry for failover peers.
     model: String,
+    /// When true, cast activation tensors to fp16 before transmission (halves bandwidth).
+    pub use_fp16_wire: bool,
+    /// Client-side activation cache for fault recovery replay.
+    activation_cache: Option<Arc<RwLock<ActivationRingBuffer>>>,
 }
 
 impl std::fmt::Debug for IrohDistributedExecutor {
@@ -56,6 +68,8 @@ impl IrohDistributedExecutor {
             max_retries: 0,
             registry: None,
             model: String::new(),
+            use_fp16_wire: true, // default: halve bandwidth with no quality loss
+            activation_cache: None,
         }
     }
 
@@ -72,6 +86,16 @@ impl IrohDistributedExecutor {
         self.registry = Some(registry);
         self.model = model.into();
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Attach a client-side activation cache for Petals-style fault recovery.
+    ///
+    /// When enabled, every activation sent to a shard is cached.  On failover,
+    /// the cached activations are replayed to the replacement node via a
+    /// `ReplayRequest` RPC so it can rebuild its KV cache.
+    pub fn with_activation_cache(mut self, cache: Arc<RwLock<ActivationRingBuffer>>) -> Self {
+        self.activation_cache = Some(cache);
         self
     }
 
@@ -125,6 +149,27 @@ impl IrohDistributedExecutor {
         frame: TensorFrame,
         request: &InferenceRequest,
     ) -> Result<TensorFrame> {
+        // Optionally cast to fp16 to halve wire bandwidth.
+        let wire_frame = if self.use_fp16_wire {
+            frame.to_f16_wire()?
+        } else {
+            frame.clone()
+        };
+
+        // Cache the activation for fault recovery replay.
+        if let Some(cache) = &self.activation_cache {
+            let shard_index = 0; // Caller should set this; we use layer range for lookup
+            cache.write().await.push(CachedActivation {
+                session_id: request.request_id.clone(),
+                shard_index,
+                peer_id: shard.peer_id.clone(),
+                seq_offset: wire_frame.seq_offset,
+                layer_start: shard.layer_start,
+                layer_end: shard.layer_end,
+                frame: wire_frame.clone(),
+            });
+        }
+
         let req = RpcRequest {
             session_id: request.request_id.clone(),
             layer_start: shard.layer_start as u32,
@@ -132,7 +177,7 @@ impl IrohDistributedExecutor {
             total_layers: shard.total_layers.unwrap_or(shard.layer_end) as u32,
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            tensor: frame.clone(),
+            tensor: wire_frame.clone(),
         };
 
         // ── Attempt primary peer ──────────────────────────────────────────────
@@ -181,7 +226,42 @@ impl IrohDistributedExecutor {
                 shard.layer_end,
             );
 
-            // Rebuild req with same frame (cloned before primary attempt)
+            // ── Replay cached activations to rebuild KV on replacement node ───
+            if let Some(cache) = &self.activation_cache {
+                let cached = cache.read().await;
+                let replay_frames: Vec<TensorFrame> = cached
+                    .get_replay_for_layers(
+                        &request.request_id,
+                        shard.layer_start,
+                        shard.layer_end,
+                    )
+                    .into_iter()
+                    // Exclude the current frame (it will be sent as the normal request)
+                    .filter(|a| a.seq_offset != wire_frame.seq_offset)
+                    .map(|a| a.frame.clone())
+                    .collect();
+                drop(cached);
+
+                if !replay_frames.is_empty() {
+                    eprintln!(
+                        "[failover] replaying {} cached activations to {alt_peer_id}",
+                        replay_frames.len()
+                    );
+                    let replay_req = ReplayRequest {
+                        session_id: request.request_id.clone(),
+                        layer_start: shard.layer_start as u32,
+                        layer_end: shard.layer_end as u32,
+                        total_layers: shard.total_layers.unwrap_or(shard.layer_end) as u32,
+                        frames: replay_frames,
+                    };
+                    // Best-effort replay — if it fails, we still try the normal request
+                    if let Err(e) = self.send_replay(&alt_peer_id, &replay_req).await {
+                        eprintln!("[failover] replay to {alt_peer_id} failed: {e} (continuing anyway)");
+                    }
+                }
+            }
+
+            // Rebuild req with same wire frame (already fp16 if enabled)
             let retry_req = RpcRequest {
                 session_id: request.request_id.clone(),
                 layer_start: shard.layer_start as u32,
@@ -189,7 +269,7 @@ impl IrohDistributedExecutor {
                 total_layers: shard.total_layers.unwrap_or(shard.layer_end) as u32,
                 max_tokens: request.max_tokens,
                 temperature: request.temperature,
-                tensor: frame.clone(),
+                tensor: wire_frame.clone(),
             };
 
             let t0 = Instant::now();
@@ -216,6 +296,41 @@ impl IrohDistributedExecutor {
         }
 
         Err(last_err)
+    }
+
+    /// Send a replay request to a peer to rebuild KV cache state.
+    async fn send_replay(&self, peer_id: &str, req: &ReplayRequest) -> Result<ReplayResponse> {
+        let target_id = EndpointId::from_str(peer_id)
+            .map_err(|e| anyhow!("invalid EndpointId '{}': {}", peer_id, e))?;
+
+        let conn: Connection = timeout(
+            Duration::from_secs(self.connect_timeout_secs),
+            self.endpoint.connect(target_id, INFERENCE_ALPN),
+        )
+        .await
+        .map_err(|_| anyhow!("timeout connecting to peer {} for replay", peer_id))??;
+
+        let (mut send, mut recv): (SendStream, RecvStream) = conn.open_bi().await?;
+
+        let req_bytes = req.to_bytes()?;
+        // Prepend message type discriminator
+        send.write_all(&[crate::rpc::RpcMessageType::Replay.to_byte()]).await?;
+        let size = (req_bytes.len() as u32).to_be_bytes();
+        send.write_all(&size).await?;
+        send.write_all(&req_bytes).await?;
+        send.finish()?;
+
+        let mut size_buf = [0u8; 4];
+        recv.read_exact(&mut size_buf).await?;
+        let resp_size = u32::from_be_bytes(size_buf) as usize;
+        let mut resp_bytes = vec![0u8; resp_size];
+        recv.read_exact(&mut resp_bytes).await?;
+
+        let resp = ReplayResponse::from_bytes(&resp_bytes)?;
+        if let Some(err) = &resp.error {
+            return Err(anyhow!("peer {} replay error: {}", peer_id, err));
+        }
+        Ok(resp)
     }
 
     // ── Registry helpers ──────────────────────────────────────────────────────

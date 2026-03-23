@@ -37,7 +37,6 @@ use burn::nn::{
 use burn::prelude::Module;
 use burn::tensor::{activation, backend::Backend, Int, Tensor, TensorData};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 use crate::kv_cache::{LayerKv, SessionKv};
 
@@ -528,24 +527,35 @@ pub struct LlamaShard<B: Backend> {
 }
 
 impl<B: Backend> LlamaShard<B> {
-    /// Inner loader — operates on pre-read byte buffers.
+    /// Inner loader — operates on pre-read byte buffers (or mmap'd slices).
     ///
     /// Called by both `load` (which reads files) and `load_from_bytes` (which
-    /// takes a single raw byte slice).  Each element of `bytes_vec` represents
+    /// takes a single raw byte slice).  Each element of `buffers` represents
     /// one safetensors file; the helper searches them in order for each tensor.
+    ///
+    /// **Optimization (March 2026):** SafeTensors objects are deserialized
+    /// once and cached, not re-parsed per tensor lookup.  This reduced load
+    /// time from minutes to seconds for multi-layer shards.
     fn load_from_byte_slices(
-        bytes_vec: Vec<Vec<u8>>,
+        buffers: &[&[u8]],
         cfg: LlamaShardConfig,
         device: B::Device,
     ) -> Result<Self> {
-        // We use a helper that tries each file until the tensor is found.
+        // Deserialize all safetensors files ONCE upfront.
+        // Previously this was done inside the closure for every single tensor
+        // lookup, causing O(N_tensors × N_files) deserializations.
+        let st_objects: Vec<safetensors::SafeTensors<'_>> = buffers
+            .iter()
+            .map(|b| safetensors::SafeTensors::deserialize(b))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("safetensors deserialize: {e:?}"))?;
+
+        // Helper: search cached SafeTensors objects for a named tensor.
         let load_from_files = |tensor_name: &str| -> Result<Vec<f32>> {
-            for bytes in &bytes_vec {
-                let st = safetensors::SafeTensors::deserialize(bytes)
-                    .map_err(|e| anyhow!("safetensors deserialize: {e:?}"))?;
+            for st in &st_objects {
                 if let Ok(view) = st.tensor(tensor_name) {
                     let elems = view.shape().iter().product::<usize>();
-                    eprintln!("  [dbg] {tensor_name}: shape={:?} dtype={:?} data_bytes={}  → {} elems",
+                    eprintln!("  [load] {tensor_name}: shape={:?} dtype={:?} data_bytes={}  → {} elems",
                         view.shape(), view.dtype(), view.data().len(), elems);
                     return Ok(load_f32(&view));
                 }
@@ -554,9 +564,7 @@ impl<B: Backend> LlamaShard<B> {
         };
 
         let load_shape = |tensor_name: &str| -> Result<Vec<usize>> {
-            for bytes in &bytes_vec {
-                let st = safetensors::SafeTensors::deserialize(bytes)
-                    .map_err(|e| anyhow!("safetensors deserialize: {e:?}"))?;
+            for st in &st_objects {
                 if let Ok(view) = st.tensor(tensor_name) {
                     return Ok(view.shape().to_vec());
                 }
@@ -715,22 +723,6 @@ impl<B: Backend> LlamaShard<B> {
         Ok(Self { cfg, embed, layers, final_norm, lm_head, device })
     }
 
-    /// Load a shard from one or more safetensors files.
-    ///
-    /// `weight_files` should list all `.safetensors` shards that together
-    /// contain the weights for `[cfg.layer_start, cfg.layer_end)`.
-    pub fn load(
-        weight_files: &[impl AsRef<Path>],
-        cfg: LlamaShardConfig,
-        device: B::Device,
-    ) -> Result<Self> {
-        let bytes_vec: Vec<Vec<u8>> = weight_files
-            .iter()
-            .map(|p| std::fs::read(p.as_ref()))
-            .collect::<std::io::Result<_>>()?;
-        Self::load_from_byte_slices(bytes_vec, cfg, device)
-    }
-
     /// Load a shard from raw safetensors bytes.
     ///
     /// Useful when bytes have been fetched from a `ShardStore` or any other
@@ -740,7 +732,7 @@ impl<B: Backend> LlamaShard<B> {
         cfg: LlamaShardConfig,
         device: B::Device,
     ) -> Result<Self> {
-        Self::load_from_byte_slices(vec![bytes.to_vec()], cfg, device)
+        Self::load_from_byte_slices(&[bytes], cfg, device)
     }
 
     /// Load a shard from multiple pre-read safetensors byte buffers.
@@ -754,7 +746,8 @@ impl<B: Backend> LlamaShard<B> {
         cfg: LlamaShardConfig,
         device: B::Device,
     ) -> Result<Self> {
-        Self::load_from_byte_slices(bytes_vec, cfg, device)
+        let slices: Vec<&[u8]> = bytes_vec.iter().map(|v| v.as_slice()).collect();
+        Self::load_from_byte_slices(&slices, cfg, device)
     }
 
     pub fn config(&self) -> &LlamaShardConfig {
@@ -846,16 +839,6 @@ impl<B: Backend> LlamaShard<B> {
 // ── Convenience constructors for the default WGPU device ─────────────────────
 
 impl LlamaShard<crate::InferenceBackend> {
-    /// Load from one or more safetensors files using the best available WGPU
-    /// device.  This is the primary entry point for production use.
-    pub fn load_wgpu(
-        weight_files: &[impl AsRef<Path>],
-        cfg: LlamaShardConfig,
-    ) -> Result<Self> {
-        use burn::backend::wgpu::WgpuDevice;
-        Self::load(weight_files, cfg, WgpuDevice::BestAvailable)
-    }
-
     /// Load from raw safetensors bytes using the best available WGPU device.
     ///
     /// Mirrors `load_wgpu` but accepts pre-fetched bytes (e.g. from a

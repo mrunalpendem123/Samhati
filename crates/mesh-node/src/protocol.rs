@@ -51,6 +51,10 @@ pub struct CapabilityPayload {
     /// Self-reported uptime in seconds.
     #[serde(default)]
     pub uptime_secs: u64,
+    /// blake3 hashes of cached weight shards (hex-encoded).
+    /// Peers can request these shards via iroh-blobs or the shard-store protocol.
+    #[serde(default)]
+    pub cached_shard_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

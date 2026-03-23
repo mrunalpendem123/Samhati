@@ -69,13 +69,6 @@ impl PeerState {
         self.pending.remove(nonce)
     }
 
-    #[allow(dead_code)]
-    pub fn prune_pending(&mut self, timeout: Duration) {
-        let now = Instant::now();
-        self.pending
-            .retain(|_, ping| now.duration_since(ping.started) < timeout);
-    }
-
     pub fn take_expired_pending(&mut self, timeout: Duration) -> Vec<PendingPing> {
         let now = Instant::now();
         let mut expired = Vec::new();
@@ -112,11 +105,4 @@ impl PeerState {
         self.cooldown_until_ms.remove(peer_id);
     }
 
-    #[allow(dead_code)]
-    pub fn is_healthy(&self, peer_id: &str, now_ms: u128) -> bool {
-        match self.cooldown_until_ms.get(peer_id) {
-            Some(until) => now_ms >= *until,
-            None => true,
-        }
-    }
 }

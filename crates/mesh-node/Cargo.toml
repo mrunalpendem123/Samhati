@@ -9,6 +9,9 @@ inference-coordinator = { path = "../inference-coordinator" }
 proximity-router      = { path = "../proximity-router" }
 cluster-manager       = { path = "../cluster-manager" }
 shard-store           = { path = "../shard-store" }
+samhati-swarm         = { path = "../samhati-swarm" }
+samhati-ranking       = { path = "../samhati-ranking" }
+samhati-toploc        = { path = "../samhati-toploc" }
 
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
@@ -23,8 +26,11 @@ sysinfo     = "0.37"
 reqwest     = { version = "0.12", features = ["json", "rustls-tls"] }
 axum        = { version = "0.7", features = ["json"] }
 bytes       = "1"
-bincode     = "1.3"
+bincode      = "1.3"
+async-trait  = "0.1"
 futures-util = "0.3"
+memmap2      = "0.9"
+safetensors  = "0.4"
 
 [features]
 burn = ["inference-coordinator/burn"]

@@ -129,6 +129,14 @@ impl ShardStore {
         }
     }
 
+    /// Return the on-disk path for a cached shard, if it exists.
+    ///
+    /// Callers can mmap this path directly instead of loading into memory via `get()`.
+    pub fn shard_file_path(&self, hash: &Hash) -> Option<std::path::PathBuf> {
+        let path = self.shard_path(hash);
+        if path.exists() { Some(path) } else { None }
+    }
+
     /// Returns `true` if the shard for `hash` is already cached locally.
     pub fn has(&self, hash: &Hash) -> bool {
         self.shard_path(hash).exists()

@@ -6,6 +6,7 @@ mod server;
 mod state;
 mod api;
 mod persist;
+mod swarm_bridge;
 use cluster_manager::ClusterConstraints;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointId};
@@ -475,10 +476,16 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
                         free_vram_gb: Some(caps.free_vram_gb),
                         last_seen_epoch_ms: None,
                     };
-                    registry_clone.write().await.upsert(
-                        caps.node_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
+                    let shard_hashes = caps.cached_shard_hashes.clone();
+                    let peer_id = caps.node_id.clone();
+                    let mut reg = registry_clone.write().await;
+                    reg.upsert(
+                        peer_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
                     );
-                    println!("  discovered peer {}", caps.node_id);
+                    if !shard_hashes.is_empty() {
+                        reg.update_cached_shards(&peer_id, shard_hashes);
+                    }
+                    println!("  discovered peer {}", peer_id);
                 }
             }
         });
@@ -504,6 +511,82 @@ async fn cmd_dist_run(args: &[String]) -> Result<()> {
         let coordinator = Coordinator::new(swarm_plan, executor);
         let output = coordinator.generate(request).await?;
         println!("output: {output}");
+        return Ok(());
+    }
+
+    if executor_name == "swarm-ranked" {
+        // Swarm-ranked mode: N independent nodes generate full answers,
+        // TOPLOC verifies proofs, peer-ranking produces pairwise comparisons,
+        // BradleyTerry selects the winner.
+        let topic_hex = get_arg(args, "--topic")
+            .ok_or_else(|| anyhow!("--topic <64-hex> is required for swarm-ranked executor"))?;
+        let topic = parse_topic_id(&topic_hex)?;
+        let bootstrap_ids = parse_bootstrap_ids(args)?;
+        let discover_secs: u64 = get_arg(args, "--discover-secs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+
+        let endpoint = Endpoint::bind().await?;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let _router = Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .spawn();
+
+        println!("joining gossip for swarm-ranked, discovering for {discover_secs}s...");
+        let swarm_model_registry = Arc::new(samhati_swarm::registry::ModelRegistry::new());
+        let swarm_model_registry_clone = swarm_model_registry.clone();
+
+        let (_, mut recv) = gossip.subscribe(topic, bootstrap_ids).await?.split();
+        let discovery = tokio::spawn(async move {
+            while let Some(Ok(Event::Received(msg))) = recv.next().await {
+                let body = String::from_utf8_lossy(&msg.content);
+                if let Some(caps) = parse_capability(&body) {
+                    let mut node_id = [0u8; 32];
+                    let id_bytes = caps.node_id.as_bytes();
+                    let len = id_bytes.len().min(32);
+                    node_id[..len].copy_from_slice(&id_bytes[..len]);
+
+                    swarm_model_registry_clone.register(samhati_swarm::NodeInfo {
+                        node_id,
+                        endpoint: caps.node_id.clone(),
+                        model_name: caps.layers_hosted.first()
+                            .map(|l| l.model.clone())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        model_size_b: 3,
+                        domain_tags: vec![],
+                        tokens_per_sec: (caps.bandwidth_mbps / 10.0) as f32,
+                        elo_score: 1500,
+                        last_seen: Instant::now(),
+                        solana_pubkey: None,
+                    });
+                    println!("  registered peer {} for swarm-ranked", caps.node_id);
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_secs(discover_secs)).await;
+        discovery.abort();
+
+        let node_count = swarm_model_registry.len();
+        println!("registered {node_count} node(s) for swarm-ranked inference");
+
+        let handle = swarm_bridge::SwarmRankedHandle::new(endpoint, swarm_model_registry);
+        let result = handle
+            .run(
+                request.input.clone(),
+                request.max_tokens as usize,
+                request.temperature,
+            )
+            .await?;
+
+        println!("winner: {}", hex::encode(result.winner_node_id));
+        println!("confidence: {:.2}", result.confidence);
+        println!("nodes used: {}", result.n_nodes);
+        println!("complexity: {:?}", result.complexity);
+        if !result.domain_tags.is_empty() {
+            println!("domains: {}", result.domain_tags.join(", "));
+        }
+        println!("output: {}", result.winning_answer);
         return Ok(());
     }
 
@@ -820,16 +903,19 @@ async fn cmd_gossip(args: &[String]) -> Result<()> {
                                 free_vram_gb: Some(caps.free_vram_gb),
                                 last_seen_epoch_ms: Some(now_millis() as u64),
                             };
-                            swarm_clone
-                                .write()
-                                .await
-                                .upsert(
-                                    caps.node_id.clone(),
-                                    metrics,
-                                    layer_ranges,
-                                    caps.load_score,
-                                    caps.uptime_secs,
-                                );
+                            let shard_hashes = caps.cached_shard_hashes.clone();
+                            let peer_id = caps.node_id.clone();
+                            let mut reg = swarm_clone.write().await;
+                            reg.upsert(
+                                peer_id.clone(),
+                                metrics,
+                                layer_ranges,
+                                caps.load_score,
+                                caps.uptime_secs,
+                            );
+                            if !shard_hashes.is_empty() {
+                                reg.update_cached_shards(&peer_id, shard_hashes);
+                            }
                         }
                         println!(
                             "capability from {}: role={:?} vram={}GB bw={}Mbps layers={}",
@@ -1347,10 +1433,16 @@ async fn cmd_api(args: &[String]) -> Result<()> {
                         free_vram_gb: Some(caps.free_vram_gb),
                         last_seen_epoch_ms: None,
                     };
-                    registry_clone.write().await.upsert(
-                        caps.node_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
+                    let shard_hashes = caps.cached_shard_hashes.clone();
+                    let peer_id = caps.node_id.clone();
+                    let mut reg = registry_clone.write().await;
+                    reg.upsert(
+                        peer_id.clone(), metrics, layers, caps.load_score, caps.uptime_secs,
                     );
-                    eprintln!("  discovered peer {}", caps.node_id);
+                    if !shard_hashes.is_empty() {
+                        reg.update_cached_shards(&peer_id, shard_hashes);
+                    }
+                    eprintln!("  discovered peer {}", peer_id);
                 }
             }
         });
@@ -1372,6 +1464,48 @@ async fn cmd_api(args: &[String]) -> Result<()> {
         None
     };
 
+    // ── Optional swarm-ranked backend (BradleyTerry + TOPLOC) ──────────────
+    let swarm_ranked = if has_flag(args, "--swarm-ranked") {
+        let endpoint = if swarm.is_some() {
+            // Reuse the endpoint from swarm if available
+            eprintln!("swarm-ranked: reusing swarm endpoint");
+            swarm.as_ref().unwrap().endpoint.clone()
+        } else {
+            Endpoint::bind().await?
+        };
+
+        let model_registry = Arc::new(samhati_swarm::registry::ModelRegistry::new());
+
+        // If we have a swarm handle, populate the model registry from the SwarmRegistry
+        if let Some(ref swarm_handle) = swarm {
+            let reg = swarm_handle.registry.read().await;
+            for peer in reg.all_peers() {
+                let peer_id = &peer.id;
+                let mut node_id = [0u8; 32];
+                let id_bytes = peer_id.as_bytes();
+                let len = id_bytes.len().min(32);
+                node_id[..len].copy_from_slice(&id_bytes[..len]);
+
+                model_registry.register(samhati_swarm::NodeInfo {
+                    node_id,
+                    endpoint: peer_id.clone(),
+                    model_name: swarm_handle.model_name.clone(),
+                    model_size_b: 3,
+                    domain_tags: vec![],
+                    tokens_per_sec: 10.0,
+                    elo_score: 1500,
+                    last_seen: Instant::now(),
+                    solana_pubkey: None,
+                });
+            }
+            eprintln!("swarm-ranked: populated {} nodes from swarm registry", model_registry.len());
+        }
+
+        Some(Arc::new(swarm_bridge::SwarmRankedHandle::new(endpoint, model_registry)))
+    } else {
+        None
+    };
+
     serve_api(ApiConfig {
         bind,
         infer_base,
@@ -1383,6 +1517,7 @@ async fn cmd_api(args: &[String]) -> Result<()> {
         rate_limit_rps,
         rate_limit_burst,
         swarm,
+        swarm_ranked,
     })
     .await
 }
@@ -1735,6 +1870,67 @@ fn get_args(args: &[String], key: &str) -> Vec<String> {
     values
 }
 
+#[cfg(feature = "burn")]
+/// Filter weight files to only those containing tensors for the given layer range.
+///
+/// Reads only the safetensors header (a few KB) from each file — no tensor data
+/// is loaded.  `layer_prefix` is e.g. `"model.layers."` for Llama or
+/// `"model.language_model.layers."` for Qwen3.5.
+///
+/// Also includes files that contain non-layer tensors needed by first/last shards
+/// (embed_tokens, model.norm, lm_head).
+fn filter_weight_files_for_layers(
+    weight_files: &[String],
+    layer_start: usize,
+    layer_end: usize,
+    layer_prefix: &str,
+) -> Result<Vec<String>> {
+    use memmap2::MmapOptions;
+
+    let mut needed = Vec::new();
+    for path in weight_files {
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow!("cannot open {path}: {e}"))?;
+        let mmap = unsafe { MmapOptions::new().map(&file) }
+            .map_err(|e| anyhow!("cannot mmap {path}: {e}"))?;
+        let st = safetensors::SafeTensors::deserialize(&mmap)
+            .map_err(|e| anyhow!("cannot parse safetensors header of {path}: {e:?}"))?;
+
+        let mut dominated_by_other_layers = true;
+        let mut has_any_needed = false;
+
+        for (name, _) in st.tensors() {
+            if let Some(rest) = name.strip_prefix(layer_prefix) {
+                // Parse the layer index from e.g. "5.self_attn.q_proj.weight"
+                if let Some(dot) = rest.find('.') {
+                    if let Ok(idx) = rest[..dot].parse::<usize>() {
+                        if idx >= layer_start && idx < layer_end {
+                            has_any_needed = true;
+                            break;
+                        }
+                        continue; // layer tensor, but not in our range
+                    }
+                }
+            }
+            // Non-layer tensor (embed_tokens, model.norm, lm_head, etc.)
+            // — always include files containing these since first/last shards need them.
+            dominated_by_other_layers = false;
+        }
+
+        if has_any_needed || !dominated_by_other_layers {
+            needed.push(path.clone());
+        }
+    }
+
+    // Fallback: if filtering left us with nothing, include all files
+    // (safety net for unusual tensor naming conventions)
+    if needed.is_empty() {
+        eprintln!("  [warn] layer filter matched no files — falling back to all {} files", weight_files.len());
+        return Ok(weight_files.to_vec());
+    }
+    Ok(needed)
+}
+
 fn parse_topic_id(hex_str: &str) -> Result<TopicId> {
     let raw = hex::decode(hex_str)
         .map_err(|_| anyhow!("topic must be 64 hex chars (32 bytes)"))?;
@@ -1877,13 +2073,18 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
             }
         });
 
-    // Build the hosted-layer-range list from optional CLI args.
-    // Operators pass: --layer-start N --layer-end M [--total-layers T] [--model-name NAME]
-    let layers_hosted = match (
-        get_arg(args, "--layer-start").and_then(|v| v.parse::<usize>().ok()),
-        get_arg(args, "--layer-end").and_then(|v| v.parse::<usize>().ok()),
-    ) {
-        (Some(ls), Some(le)) => {
+    // Build the hosted-layer-range list from CLI args.
+    //
+    // The serve command always provides --layer-end (required) and --layer-start
+    // (defaults to 0).  Previously this only populated layers_hosted when BOTH
+    // flags were explicitly passed, leaving it empty when --layer-start was
+    // omitted (defaulting to 0).  Now we accept --layer-end alone as sufficient
+    // since --layer-start defaults to 0 in cmd_serve.
+    let layers_hosted = match get_arg(args, "--layer-end").and_then(|v| v.parse::<usize>().ok()) {
+        Some(le) => {
+            let ls = get_arg(args, "--layer-start")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
             let total = get_arg(args, "--total-layers")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(le);
@@ -1894,6 +2095,13 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
         }
         _ => Vec::new(),
     };
+
+    // Collect cached shard hashes from the ShardStore, if one is configured.
+    let cached_shard_hashes: Vec<String> = get_arg(args, "--store-path")
+        .and_then(|sp| shard_store::ShardStore::open(&sp).ok())
+        .and_then(|store| store.list().ok())
+        .map(|entries| entries.iter().map(|m| m.hash.to_hex()).collect())
+        .unwrap_or_default();
 
     let payload = CapabilityPayload {
         node_id,
@@ -1909,6 +2117,7 @@ fn capability_from_args(args: &[String], node_id: String) -> (CapabilityPayload,
         layers_hosted,
         load_score: 0.0,
         uptime_secs: process_uptime_secs(),
+        cached_shard_hashes,
     };
     (payload, available_gb)
 }
@@ -1993,10 +2202,9 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
         let model_path   = get_arg(args, "--model-path");
         let store_path   = get_arg(args, "--store-path");
         let shard_hash   = get_arg(args, "--shard-hash");
+        let model_type   = get_arg(args, "--model-type").unwrap_or_else(|| "llama".to_string());
 
         if model_path.is_some() || (store_path.is_some() && shard_hash.is_some()) {
-            use inference_coordinator::LlamaShardConfig;
-
             let layer_start = get_arg(args, "--layer-start")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
@@ -2031,61 +2239,157 @@ async fn cmd_serve(args: &[String]) -> Result<()> {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(4096);
 
-            let shard_config = LlamaShardConfig {
-                layer_start, layer_end, total_layers,
-                num_attention_heads, num_key_value_heads,
-                hidden_size, intermediate_size, vocab_size,
-                rope_theta, rms_norm_eps, max_seq_len,
-            };
+            let server = match model_type.as_str() {
+                "qwen35" => {
+                    use inference_coordinator::Qwen35ShardConfig;
 
-            let server = if let (Some(sp), Some(hh)) = (store_path, shard_hash) {
-                // ── Load from pre-cached ShardStore ──────────────────────────
-                println!("loading shard layers {}..{} from store {} hash {} ...",
-                    layer_start, layer_end, sp, hh);
-                let store = shard_store::ShardStore::open(&sp)?;
-                let hash  = shard_store::Hash::from_hex(&hh)?;
-                InferenceServer::new_from_store(&store, &hash, shard_config, kv_ttl)?
-            } else {
-                // ── Load from disk; optionally populate ShardStore ───────────
-                let mp = model_path.unwrap();
-                let weight_files: Vec<String> = mp
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
-                println!("loading shard layers {}..{} from {:?} ...",
-                    layer_start, layer_end, weight_files);
+                    let head_dim = get_arg(args, "--head-dim")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(256);
+                    let partial_rotary_factor = get_arg(args, "--partial-rotary-factor")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.25);
+                    let full_attn_interval = get_arg(args, "--full-attn-interval")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(4);
+                    let conv_kernel = get_arg(args, "--conv-kernel")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(4);
+                    let linear_num_key_heads = get_arg(args, "--linear-key-heads")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(num_attention_heads);
+                    let linear_key_head_dim = get_arg(args, "--linear-key-dim")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(128);
+                    let linear_num_value_heads = get_arg(args, "--linear-value-heads")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(linear_num_key_heads * 2);
+                    let linear_value_head_dim = get_arg(args, "--linear-value-dim")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(linear_key_head_dim);
 
-                // Read all weight files into memory once.
-                let bytes_vec: Vec<Vec<u8>> = weight_files
-                    .iter()
-                    .map(|p| std::fs::read(p))
-                    .collect::<std::io::Result<_>>()?;
+                    let shard_config = Qwen35ShardConfig {
+                        layer_start, layer_end, total_layers,
+                        num_attention_heads, num_key_value_heads,
+                        hidden_size, intermediate_size, vocab_size,
+                        head_dim, rope_theta, rms_norm_eps, max_seq_len,
+                        partial_rotary_factor, full_attn_interval, conv_kernel,
+                        linear_num_key_heads, linear_key_head_dim,
+                        linear_num_value_heads, linear_value_head_dim,
+                    };
 
-                // If --store-path is given without --shard-hash, populate the
-                // ShardStore so the next startup can use --shard-hash instead of
-                // reading from disk.  Prints the hash for each file.
-                if let Some(sp) = get_arg(args, "--store-path") {
-                    let store = shard_store::ShardStore::open(&sp)?;
-                    for (i, file_bytes) in bytes_vec.iter().enumerate() {
-                        let hash = store.add_shard(
-                            file_bytes,
-                            &format!("layers_{layer_start}_{layer_end}"),
-                            layer_start as u32,
-                            layer_end as u32,
+                    let mp = model_path.ok_or_else(|| anyhow!(
+                        "--model-path is required for qwen35 (ShardStore loading not yet supported)"
+                    ))?;
+                    let weight_files: Vec<String> = mp
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect();
+
+                    // Filter: only mmap files that contain tensors for our layer range.
+                    let needed_files = filter_weight_files_for_layers(
+                        &weight_files, layer_start, layer_end,
+                        "model.language_model.layers.",
+                    )?;
+                    println!("loading Qwen3.5 shard layers {}..{} from {} of {} files ...",
+                        layer_start, layer_end, needed_files.len(), weight_files.len());
+
+                    // Memory-map instead of fs::read — only pages for our tensors are loaded.
+                    let mmaps: Vec<memmap2::Mmap> = needed_files
+                        .iter()
+                        .map(|p| {
+                            let file = std::fs::File::open(p)?;
+                            unsafe { memmap2::MmapOptions::new().map(&file) }
+                        })
+                        .collect::<std::io::Result<_>>()?;
+
+                    if let Some(sp) = get_arg(args, "--store-path") {
+                        let store = shard_store::ShardStore::open(&sp)?;
+                        for (i, mmap) in mmaps.iter().enumerate() {
+                            let hash = store.add_shard(
+                                mmap.as_ref(),
+                                &format!("layers_{layer_start}_{layer_end}"),
+                                layer_start as u32,
+                                layer_end as u32,
+                            )?;
+                            println!(
+                                "  [shard cache] file[{i}] → store={sp} hash={hash}"
+                            );
+                        }
+                    }
+
+                    use inference_coordinator::qwen35_shard::Qwen35Shard as QS;
+                    let slices: Vec<&[u8]> = mmaps.iter().map(|m| m.as_ref()).collect();
+                    let bytes_vec: Vec<Vec<u8>> = slices.iter().map(|s| s.to_vec()).collect();
+                    let shard = QS::load_from_bytes_multi_wgpu(bytes_vec, shard_config.clone())?;
+                    InferenceServer::new_qwen35(shard, &shard_config, kv_ttl)
+                }
+                _ => {
+                    // Default: Llama-style
+                    use inference_coordinator::LlamaShardConfig;
+
+                    let shard_config = LlamaShardConfig {
+                        layer_start, layer_end, total_layers,
+                        num_attention_heads, num_key_value_heads,
+                        hidden_size, intermediate_size, vocab_size,
+                        rope_theta, rms_norm_eps, max_seq_len,
+                    };
+
+                    if let (Some(sp), Some(hh)) = (store_path, shard_hash) {
+                        println!("loading shard layers {}..{} from store {} hash {} ...",
+                            layer_start, layer_end, sp, hh);
+                        let store = shard_store::ShardStore::open(&sp)?;
+                        let hash  = shard_store::Hash::from_hex(&hh)?;
+                        InferenceServer::new_from_store(&store, &hash, shard_config, kv_ttl)?
+                    } else {
+                        let mp = model_path.unwrap();
+                        let weight_files: Vec<String> = mp
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect();
+
+                        // Filter: only mmap files that contain tensors for our layer range.
+                        let needed_files = filter_weight_files_for_layers(
+                            &weight_files, layer_start, layer_end,
+                            "model.layers.",
                         )?;
-                        println!(
-                            "  [shard cache] file[{i}] → store={sp} hash={hash}"
-                        );
-                        println!(
-                            "  hint: next time use: --store-path {sp} --shard-hash {hash}"
-                        );
+                        println!("loading shard layers {}..{} from {} of {} files ...",
+                            layer_start, layer_end, needed_files.len(), weight_files.len());
+
+                        // Memory-map instead of fs::read — only pages for our tensors are loaded.
+                        let mmaps: Vec<memmap2::Mmap> = needed_files
+                            .iter()
+                            .map(|p| {
+                                let file = std::fs::File::open(p)?;
+                                unsafe { memmap2::MmapOptions::new().map(&file) }
+                            })
+                            .collect::<std::io::Result<_>>()?;
+
+                        if let Some(sp) = get_arg(args, "--store-path") {
+                            let store = shard_store::ShardStore::open(&sp)?;
+                            for (i, mmap) in mmaps.iter().enumerate() {
+                                let hash = store.add_shard(
+                                    mmap.as_ref(),
+                                    &format!("layers_{layer_start}_{layer_end}"),
+                                    layer_start as u32,
+                                    layer_end as u32,
+                                )?;
+                                println!(
+                                    "  [shard cache] file[{i}] → store={sp} hash={hash}"
+                                );
+                                println!(
+                                    "  hint: next time use: --store-path {sp} --shard-hash {hash}"
+                                );
+                            }
+                        }
+
+                        use inference_coordinator::llm_shard::LlamaShard as LS;
+                        let slices: Vec<&[u8]> = mmaps.iter().map(|m| m.as_ref()).collect();
+                        let bytes_vec: Vec<Vec<u8>> = slices.iter().map(|s| s.to_vec()).collect();
+                        let shard = LS::load_from_bytes_multi_wgpu(bytes_vec, shard_config.clone())?;
+                        InferenceServer::new(shard, &shard_config, kv_ttl)
                     }
                 }
-
-                // Load the shard from in-memory bytes (no second disk read).
-                use inference_coordinator::llm_shard::LlamaShard as LS;
-                let shard = LS::load_from_bytes_multi_wgpu(bytes_vec, shard_config)?;
-                InferenceServer::new(shard, kv_ttl)
             };
             println!("shard loaded — serving on {node_id}");
 

@@ -19,6 +19,7 @@ use inference_coordinator::{Coordinator, IrohDistributedExecutor, InferenceReque
 use proximity_router::SwarmRegistry;
 
 use crate::inference::{infer_http, infer_http_stream, infer_local_exec, words_stream, ChatMessage, LocalExecConfig};
+use crate::swarm_bridge::SwarmRankedHandle;
 
 pub struct SwarmHandle {
     pub endpoint: iroh::Endpoint,
@@ -53,6 +54,7 @@ pub struct ApiConfig {
     pub rate_limit_rps: Option<f64>,
     pub rate_limit_burst: Option<u32>,
     pub swarm: Option<Arc<SwarmHandle>>,
+    pub swarm_ranked: Option<Arc<SwarmRankedHandle>>,
 }
 
 pub struct ApiState {
@@ -64,6 +66,7 @@ pub struct ApiState {
     pub allow_models: Option<HashSet<String>>,
     rate_limiter: Option<Arc<Mutex<RateLimiter>>>,
     pub swarm: Option<Arc<SwarmHandle>>,
+    pub swarm_ranked: Option<Arc<SwarmRankedHandle>>,
 }
 
 pub async fn serve(config: ApiConfig) -> Result<()> {
@@ -80,6 +83,7 @@ pub async fn serve(config: ApiConfig) -> Result<()> {
         },
         rate_limiter: build_rate_limiter(config.rate_limit_rps, config.rate_limit_burst),
         swarm: config.swarm,
+        swarm_ranked: config.swarm_ranked,
     };
 
     let app = Router::new()
@@ -183,7 +187,7 @@ async fn chat_completions(
     if let Err(resp) = check_rate_limit(&state).await {
         return resp;
     }
-    if state.infer_base.is_none() && state.local_exec.is_none() && state.swarm.is_none() {
+    if state.infer_base.is_none() && state.local_exec.is_none() && state.swarm.is_none() && state.swarm_ranked.is_none() {
         return api_error(
             StatusCode::NOT_IMPLEMENTED,
             "not_configured",
@@ -216,7 +220,23 @@ async fn chat_completions(
     // ── Streaming path ────────────────────────────────────────────────────────
     if req.stream.unwrap_or(false) {
         let content_stream: BoxStream<'static, String> =
-            if let Some(swarm) = state.swarm.clone() {
+            if let Some(ranked) = state.swarm_ranked.clone() {
+                let prompt = messages
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                match ranked.run(prompt, max_tokens as usize, temperature).await {
+                    Ok(result) => Box::pin(words_stream(result.winning_answer)),
+                    Err(e) => {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "swarm_ranked_error",
+                            &e.to_string(),
+                        );
+                    }
+                }
+            } else if let Some(swarm) = state.swarm.clone() {
                 let prompt = messages
                     .iter()
                     .map(|m| format!("{}: {}", m.role, m.content))
@@ -275,7 +295,23 @@ async fn chat_completions(
     }
 
     // ── Non-streaming path ────────────────────────────────────────────────────
-    let content = if let Some(swarm) = state.swarm.clone() {
+    let content = if let Some(ranked) = state.swarm_ranked.clone() {
+        let prompt = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        match ranked.run(prompt, max_tokens as usize, temperature).await {
+            Ok(result) => result.winning_answer,
+            Err(e) => {
+                return api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "swarm_ranked_error",
+                    &e.to_string(),
+                );
+            }
+        }
+    } else if let Some(swarm) = state.swarm.clone() {
         let prompt = messages
             .iter()
             .map(|m| format!("{}: {}", m.role, m.content))

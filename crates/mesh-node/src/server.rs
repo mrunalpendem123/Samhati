@@ -18,28 +18,57 @@ mod real {
     use super::*;
     use anyhow::Result;
     use inference_coordinator::{
+        activation_cache::{CachedOutput, OutputRingBuffer},
         kv_cache::{KvCacheStore, SessionKv},
         llm_shard::{LlamaShard, LlamaShardConfig},
+        qwen35_cache::{Qwen35CacheStore, Qwen35Session},
+        qwen35_shard::{Qwen35Shard, Qwen35ShardConfig},
         rpc::{RpcRequest, RpcResponse},
         tensor_frame::TensorFrame,
         InferenceBackend,
     };
     use std::collections::HashMap;
+    use tokio::sync::RwLock;
 
     type InferBackend = InferenceBackend;
 
-    /// A persistent iroh ALPN handler that:
-    /// 1. Holds a loaded `LlamaShard` (transformer layers + optional embed / lm_head).
-    /// 2. Maintains a `KvCacheStore` shared across all concurrent sessions.
-    /// 3. For each incoming QUIC bi-stream: deserialises an `RpcRequest`,
-    ///    runs the shard forward pass, and streams back an `RpcResponse`.
-    // `LlamaShard<B>` is `Send` but `!Sync` because `Param<T>` uses
-    // `once_cell::unsync::OnceCell`.  Wrapping in `Mutex` gives `Sync` (Mutex<T>:
-    // Sync if T: Send), which satisfies the `ProtocolHandler: Sync` bound.
+    /// Which model architecture is loaded.
+    enum ShardKind {
+        Llama {
+            shard: Arc<Mutex<LlamaShard<InferBackend>>>,
+            kv: KvCacheStore<InferBackend>,
+        },
+        Qwen35 {
+            shard: Arc<Mutex<Qwen35Shard<InferBackend>>>,
+            cache: Qwen35CacheStore<InferBackend>,
+        },
+    }
+
+    impl Clone for ShardKind {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Llama { shard, kv } => Self::Llama {
+                    shard: shard.clone(),
+                    kv: kv.clone(),
+                },
+                Self::Qwen35 { shard, cache } => Self::Qwen35 {
+                    shard: shard.clone(),
+                    cache: cache.clone(),
+                },
+            }
+        }
+    }
+
+    /// A persistent iroh ALPN handler that supports both Llama-style and
+    /// Qwen3.5-style model architectures.
+    ///
+    /// Includes a server-side output ring buffer (Petals dual-cache) that
+    /// caches the last 64 output activations for fault recovery replay.
     #[derive(Clone)]
     pub struct InferenceServer {
-        shard: Arc<Mutex<LlamaShard<InferBackend>>>,
-        kv: KvCacheStore<InferBackend>,
+        kind: ShardKind,
+        /// Server-side output cache for fault recovery.
+        output_cache: Arc<RwLock<OutputRingBuffer>>,
     }
 
     impl std::fmt::Debug for InferenceServer {
@@ -49,10 +78,30 @@ mod real {
     }
 
     impl InferenceServer {
-        pub fn new(shard: LlamaShard<InferBackend>, kv_ttl_secs: u64) -> Self {
+        /// Construct a server for a Llama-style shard.
+        ///
+        /// The KV cache is scoped to the shard's layer range so each node
+        /// only stores KV for the layers it owns (layer-local ownership).
+        pub fn new(shard: LlamaShard<InferBackend>, cfg: &LlamaShardConfig, kv_ttl_secs: u64) -> Self {
+            let layer_range = cfg.layer_start..cfg.layer_end;
             Self {
-                shard: Arc::new(Mutex::new(shard)),
-                kv: KvCacheStore::new(kv_ttl_secs),
+                kind: ShardKind::Llama {
+                    shard: Arc::new(Mutex::new(shard)),
+                    kv: KvCacheStore::new(kv_ttl_secs, layer_range),
+                },
+                output_cache: Arc::new(RwLock::new(OutputRingBuffer::new(64))),
+            }
+        }
+
+        /// Construct a server for a Qwen3.5-style shard.
+        pub fn new_qwen35(shard: Qwen35Shard<InferBackend>, cfg: &Qwen35ShardConfig, kv_ttl_secs: u64) -> Self {
+            let layer_types = cfg.local_layer_types();
+            Self {
+                kind: ShardKind::Qwen35 {
+                    shard: Arc::new(Mutex::new(shard)),
+                    cache: Qwen35CacheStore::new(kv_ttl_secs, layer_types),
+                },
+                output_cache: Arc::new(RwLock::new(OutputRingBuffer::new(64))),
             }
         }
 
@@ -67,8 +116,8 @@ mod real {
             let bytes = store
                 .get(hash)?
                 .ok_or_else(|| anyhow::anyhow!("shard hash {} not in store", hash))?;
-            let shard = LlamaShard::load_from_bytes_wgpu(&bytes, cfg)?;
-            Ok(Self::new(shard, kv_ttl_secs))
+            let shard = LlamaShard::load_from_bytes_wgpu(&bytes, cfg.clone())?;
+            Ok(Self::new(shard, &cfg, kv_ttl_secs))
         }
 
         async fn handle_stream(
@@ -90,29 +139,55 @@ mod real {
                 }
             };
 
-            let n_layers = (req.layer_end - req.layer_start) as usize;
             let session_id = req.session_id.clone();
 
-            // 2. Ensure the session's KV cache exists and is fresh
-            self.kv.touch(&session_id, n_layers).await;
-
-            // 3. Run forward pass (sync lock on shard — no await while held)
-            let result = {
-                let mut map: tokio::sync::RwLockWriteGuard<
-                    HashMap<String, SessionKv<InferBackend>>,
-                > = self.kv.inner.write().await;
-                let session = map
-                    .get_mut(&session_id)
-                    .ok_or_else(|| anyhow::anyhow!("session vanished"))?;
-                let shard = self
-                    .shard
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("shard lock poisoned"))?;
-                shard.forward(&req.tensor, session)
+            // 2-3. Dispatch based on shard kind
+            let result = match &self.kind {
+                ShardKind::Llama { shard, kv } => {
+                    // Validate that the request's layer range falls within our scope.
+                    if let Err(e) = kv.validate_range(req.layer_start as usize, req.layer_end as usize) {
+                        return send_error(&mut send, format!("layer range error: {e}")).await;
+                    }
+                    kv.touch(&session_id).await;
+                    let mut map: tokio::sync::RwLockWriteGuard<
+                        HashMap<String, SessionKv<InferBackend>>,
+                    > = kv.inner.write().await;
+                    let session = map
+                        .get_mut(&session_id)
+                        .ok_or_else(|| anyhow::anyhow!("session vanished"))?;
+                    let shard = shard
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("shard lock poisoned"))?;
+                    shard.forward(&req.tensor, session)
+                }
+                ShardKind::Qwen35 { shard, cache } => {
+                    cache.touch(&session_id).await;
+                    let mut map: tokio::sync::RwLockWriteGuard<
+                        HashMap<String, Qwen35Session<InferBackend>>,
+                    > = cache.inner.write().await;
+                    let session = map
+                        .get_mut(&session_id)
+                        .ok_or_else(|| anyhow::anyhow!("session vanished"))?;
+                    let shard = shard
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("shard lock poisoned"))?;
+                    shard.forward(&req.tensor, session)
+                }
             };
 
             let resp = match result {
-                Ok(out_frame) => RpcResponse { tensor: out_frame, error: None },
+                Ok(out_frame) => {
+                    // Cache the output activation for fault recovery (Petals dual-cache)
+                    {
+                        let mut cache = self.output_cache.write().await;
+                        cache.push(CachedOutput {
+                            session_id: session_id.clone(),
+                            seq_offset: req.tensor.seq_offset,
+                            frame: out_frame.clone(),
+                        });
+                    }
+                    RpcResponse { tensor: out_frame, error: None }
+                }
                 Err(e) => {
                     let dummy = TensorFrame::from_f32(&[0.0], vec![1, 1], 0);
                     RpcResponse { tensor: dummy, error: Some(format!("{e}")) }
