@@ -44,7 +44,7 @@ fn handle_tab_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
             handle_models_key(app, key);
             None
         }
-        Tab::Wallet => None,
+        Tab::Wallet => handle_wallet_key(app, key),
         Tab::Settings => {
             handle_settings_key(app, key);
             None
@@ -55,6 +55,7 @@ fn handle_tab_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
 /// Returned when the chat tab wants to fire off an async API call.
 pub enum ChatAction {
     SendMessage(String),
+    RequestAirdrop,
 }
 
 fn handle_chat_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
@@ -131,6 +132,17 @@ fn handle_models_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+fn handle_wallet_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
+    match key.code {
+        KeyCode::Char('a') => {
+            // Request airdrop
+            return Some(ChatAction::RequestAirdrop);
+        }
+        _ => {}
+    }
+    None
 }
 
 fn handle_settings_key(app: &mut App, key: KeyEvent) {

@@ -104,9 +104,13 @@ pub struct App {
     pub models: Vec<ModelInfo>,
     pub selected_model_idx: usize,
 
-    // Wallet state
+    // Wallet state — REAL Solana
+    pub wallet: Option<crate::wallet::SolanaWallet>,
     pub wallet_pubkey: String,
+    pub wallet_short: String,
+    pub sol_balance: f64,         // real SOL balance from devnet
     pub pending_rewards: f64,
+    pub wallet_status: String,    // status messages (airdrop, errors)
     pub tx_history: Vec<TxEntry>,
 
     // Settings
@@ -149,40 +153,13 @@ impl App {
             models: detect_models(),
             selected_model_idx: 0,
 
-            wallet_pubkey: "smti1q7x8...k4f2m9".into(),
-            pending_rewards: 8.74,
-            tx_history: vec![
-                TxEntry {
-                    timestamp: "2026-03-23 14:22".into(),
-                    tx_type: "reward".into(),
-                    amount: 0.42,
-                    status: "confirmed".into(),
-                },
-                TxEntry {
-                    timestamp: "2026-03-23 11:05".into(),
-                    tx_type: "reward".into(),
-                    amount: 0.38,
-                    status: "confirmed".into(),
-                },
-                TxEntry {
-                    timestamp: "2026-03-22 22:47".into(),
-                    tx_type: "claim".into(),
-                    amount: 5.10,
-                    status: "confirmed".into(),
-                },
-                TxEntry {
-                    timestamp: "2026-03-22 09:30".into(),
-                    tx_type: "stake".into(),
-                    amount: -10.00,
-                    status: "confirmed".into(),
-                },
-                TxEntry {
-                    timestamp: "2026-03-21 18:12".into(),
-                    tx_type: "reward".into(),
-                    amount: 1.23,
-                    status: "confirmed".into(),
-                },
-            ],
+            wallet: None,
+            wallet_pubkey: "loading...".into(),
+            wallet_short: "...".into(),
+            sol_balance: 0.0,
+            pending_rewards: 0.0,
+            wallet_status: String::new(),
+            tx_history: vec![], // populated from real Solana devnet
 
             api_endpoint: "http://localhost:8000".into(),
             max_vram_gb: 24.0,

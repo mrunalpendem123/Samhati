@@ -6,49 +6,94 @@ use crate::ui::{BG, DIM_PURPLE, PURPLE, SURFACE};
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::vertical([
+        Constraint::Length(5),  // pubkey
         Constraint::Length(8),  // balance overview
-        Constraint::Min(1),     // tx history
+        Constraint::Length(3),  // status / help
+        Constraint::Min(1),    // tx history
     ])
     .split(area);
 
-    draw_balance(frame, app, layout[0]);
-    draw_tx_history(frame, app, layout[1]);
+    draw_pubkey(frame, app, layout[0]);
+    draw_balance(frame, app, layout[1]);
+    draw_status(frame, app, layout[2]);
+    draw_tx_history(frame, app, layout[3]);
+}
+
+fn draw_pubkey(frame: &mut Frame, app: &App, area: Rect) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Solana Pubkey: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&app.wallet_pubkey, Style::default().fg(Color::Yellow).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Network: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Devnet", Style::default().fg(Color::Cyan)),
+            Span::styled("  |  Keypair: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                app.wallet.as_ref()
+                    .map(|w| w.keypair_path.display().to_string())
+                    .unwrap_or_else(|| "none".into()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+
+    let block = Block::bordered()
+        .title(Span::styled(" Wallet Identity ", Style::default().fg(PURPLE).bold()))
+        .border_style(Style::default().fg(DIM_PURPLE))
+        .style(Style::default().bg(SURFACE));
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_balance(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([
-        Constraint::Percentage(40),
-        Constraint::Percentage(30),
-        Constraint::Percentage(30),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
     ])
     .split(area);
 
-    // Balance
-    let balance_lines = vec![
+    // SOL Balance (real from devnet)
+    let sol_lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("{:.3} SMTI", app.smti_balance),
+            format!("{:.4} SOL", app.sol_balance),
             Style::default().fg(Color::Yellow).bold(),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            format!("Pubkey: {}", app.wallet_pubkey),
+            "Devnet Balance",
             Style::default().fg(Color::DarkGray),
         )),
     ];
 
-    let balance_block = Block::bordered()
-        .title(Span::styled(
-            " Balance ",
-            Style::default().fg(PURPLE).bold(),
-        ))
+    let sol_block = Block::bordered()
+        .title(Span::styled(" SOL ", Style::default().fg(PURPLE).bold()))
         .border_style(Style::default().fg(DIM_PURPLE))
         .style(Style::default().bg(SURFACE));
+    frame.render_widget(Paragraph::new(sol_lines).block(sol_block).alignment(Alignment::Center), cols[0]);
 
-    let p = Paragraph::new(balance_lines)
-        .block(balance_block)
-        .alignment(Alignment::Center);
-    frame.render_widget(p, cols[0]);
+    // SMTI Balance (protocol token — will be real after token mint)
+    let smti_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("{:.3} SMTI", app.smti_balance),
+            Style::default().fg(Color::Magenta).bold(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Protocol Token",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let smti_block = Block::bordered()
+        .title(Span::styled(" SMTI ", Style::default().fg(PURPLE).bold()))
+        .border_style(Style::default().fg(DIM_PURPLE))
+        .style(Style::default().bg(SURFACE));
+    frame.render_widget(Paragraph::new(smti_lines).block(smti_block).alignment(Alignment::Center), cols[1]);
 
     // Pending rewards
     let reward_lines = vec![
@@ -65,98 +110,74 @@ fn draw_balance(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     let reward_block = Block::bordered()
-        .title(Span::styled(
-            " Rewards ",
-            Style::default().fg(PURPLE).bold(),
-        ))
+        .title(Span::styled(" Rewards ", Style::default().fg(PURPLE).bold()))
         .border_style(Style::default().fg(DIM_PURPLE))
         .style(Style::default().bg(SURFACE));
+    frame.render_widget(Paragraph::new(reward_lines).block(reward_block).alignment(Alignment::Center), cols[2]);
+}
 
-    let r = Paragraph::new(reward_lines)
-        .block(reward_block)
-        .alignment(Alignment::Center);
-    frame.render_widget(r, cols[1]);
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let status_text = if !app.wallet_status.is_empty() {
+        vec![Span::styled(&app.wallet_status, Style::default().fg(Color::Cyan))]
+    } else {
+        vec![
+            Span::styled(" a ", Style::default().fg(PURPLE).bold()),
+            Span::styled("request devnet airdrop (1 SOL)  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" r ", Style::default().fg(PURPLE).bold()),
+            Span::styled("refresh balance", Style::default().fg(Color::DarkGray)),
+        ]
+    };
 
-    // Earned today
-    let today_lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("+{:.2} SMTI", app.smti_earned_today),
-            Style::default().fg(Color::Cyan).bold(),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Earned Today",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    let today_block = Block::bordered()
-        .title(Span::styled(
-            " Today ",
-            Style::default().fg(PURPLE).bold(),
-        ))
-        .border_style(Style::default().fg(DIM_PURPLE))
-        .style(Style::default().bg(SURFACE));
-
-    let t = Paragraph::new(today_lines)
-        .block(today_block)
-        .alignment(Alignment::Center);
-    frame.render_widget(t, cols[2]);
+    let help = Paragraph::new(Line::from(status_text))
+        .block(
+            Block::bordered()
+                .border_style(Style::default().fg(DIM_PURPLE))
+                .style(Style::default().bg(SURFACE)),
+        );
+    frame.render_widget(help, area);
 }
 
 fn draw_tx_history(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Timestamp").style(Style::default().fg(PURPLE).bold()),
-        Cell::from("Type").style(Style::default().fg(PURPLE).bold()),
-        Cell::from("Amount").style(Style::default().fg(PURPLE).bold()),
         Cell::from("Status").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Signature").style(Style::default().fg(PURPLE).bold()),
     ])
     .height(1)
     .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .tx_history
-        .iter()
-        .map(|tx| {
-            let type_style = match tx.tx_type.as_str() {
-                "reward" => Style::default().fg(Color::Green),
-                "claim" => Style::default().fg(Color::Yellow),
-                "stake" => Style::default().fg(Color::Magenta),
-                _ => Style::default().fg(Color::White),
-            };
+    let rows: Vec<Row> = if app.tx_history.is_empty() {
+        vec![Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "No transactions yet — request an airdrop with 'a'",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Cell::from(""),
+        ])]
+    } else {
+        app.tx_history
+            .iter()
+            .map(|tx| {
+                let status_style = match tx.tx_type.as_str() {
+                    "confirmed" => Style::default().fg(Color::Green),
+                    "failed" => Style::default().fg(Color::Red),
+                    _ => Style::default().fg(Color::Yellow),
+                };
 
-            let amount_str = if tx.amount >= 0.0 {
-                format!("+{:.2}", tx.amount)
-            } else {
-                format!("{:.2}", tx.amount)
-            };
-            let amount_color = if tx.amount >= 0.0 {
-                Color::Green
-            } else {
-                Color::Red
-            };
-
-            let status_style = match tx.status.as_str() {
-                "confirmed" => Style::default().fg(Color::Green),
-                "pending" => Style::default().fg(Color::Yellow),
-                _ => Style::default().fg(Color::DarkGray),
-            };
-
-            Row::new(vec![
-                Cell::from(tx.timestamp.clone()),
-                Cell::from(Span::styled(tx.tx_type.clone(), type_style)),
-                Cell::from(Span::styled(amount_str, Style::default().fg(amount_color))),
-                Cell::from(Span::styled(tx.status.clone(), status_style)),
-            ])
-        })
-        .collect();
+                Row::new(vec![
+                    Cell::from(tx.timestamp.clone()),
+                    Cell::from(Span::styled(tx.tx_type.clone(), status_style)),
+                    Cell::from(Span::styled(tx.status.clone(), Style::default().fg(Color::DarkGray))),
+                ])
+            })
+            .collect()
+    };
 
     let widths = [
-        Constraint::Percentage(30),
-        Constraint::Percentage(20),
         Constraint::Percentage(25),
-        Constraint::Percentage(25),
+        Constraint::Percentage(15),
+        Constraint::Percentage(60),
     ];
 
     let table = Table::new(rows, widths)
@@ -164,7 +185,7 @@ fn draw_tx_history(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::bordered()
                 .title(Span::styled(
-                    " Transaction History ",
+                    " Recent Transactions (Solana Devnet) ",
                     Style::default().fg(PURPLE).bold(),
                 ))
                 .border_style(Style::default().fg(DIM_PURPLE))
