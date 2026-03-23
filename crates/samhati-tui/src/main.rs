@@ -1,11 +1,15 @@
 mod app;
 mod api;
 mod events;
+mod model_download;
+mod node_runner;
 mod tabs;
 mod ui;
 mod wallet;
 
 use std::io;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -19,6 +23,8 @@ use ratatui::prelude::*;
 use app::{App, ChatMessage};
 use api::ApiClient;
 use events::{ChatAction, handle_key, poll_event};
+use model_download::ModelDownloader;
+use node_runner::NodeRunner;
 use wallet::SolanaWallet;
 
 fn main() -> Result<()> {
@@ -46,6 +52,9 @@ fn main() -> Result<()> {
         }
     }
 
+    let downloader = ModelDownloader::new();
+    let mut node_runner = NodeRunner::new();
+
     let tick_rate = Duration::from_millis(33);
 
     // Pending async tasks
@@ -54,6 +63,9 @@ fn main() -> Result<()> {
     let mut pending_txs: Option<tokio::task::JoinHandle<Result<Vec<wallet::TxInfo>>>> = None;
     let mut pending_health: Option<tokio::task::JoinHandle<Result<bool>>> = None;
     let mut pending_airdrop: Option<tokio::task::JoinHandle<Result<String>>> = None;
+    let mut pending_download: Option<tokio::task::JoinHandle<Result<PathBuf>>> = None;
+    let download_progress_shared: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+    let mut download_model_idx: Option<usize> = None;
     let mut last_refresh = Instant::now().checked_sub(Duration::from_secs(30)).unwrap_or_else(Instant::now);
 
     while app.running {
@@ -100,6 +112,27 @@ fn main() -> Result<()> {
         check_chat(&rt, &mut pending_chat, &mut app);
         check_airdrop(&rt, &mut pending_airdrop, &mut app);
 
+        // Update download progress from shared state
+        if let Ok(guard) = download_progress_shared.lock() {
+            if let Some(pct) = *guard {
+                app.download_progress = Some(pct);
+                if let Some(idx) = download_model_idx {
+                    let name = &app.models[idx].name;
+                    app.download_status = format!("Downloading {}... {:.0}%", name, pct);
+                }
+            }
+        }
+
+        // Check if download completed
+        check_download(
+            &rt,
+            &mut pending_download,
+            &mut download_model_idx,
+            &download_progress_shared,
+            &mut app,
+            &mut node_runner,
+        );
+
         // Poll events
         if let Some(event) = poll_event(tick_rate)? {
             if let Event::Key(key) = event {
@@ -124,6 +157,39 @@ fn main() -> Result<()> {
                                     app.wallet_status = "Requesting airdrop...".into();
                                 }
                             }
+                            ChatAction::SelectModel(idx) => {
+                                if pending_download.is_none() {
+                                    let model_name = app.models[idx].name.clone();
+
+                                    if downloader.is_downloaded(&model_name) {
+                                        // Already downloaded — just start the node
+                                        let path = downloader.model_path(&model_name);
+                                        activate_model(&mut app, &mut node_runner, idx, &path);
+                                    } else {
+                                        // Kick off async download
+                                        download_model_idx = Some(idx);
+                                        let progress = Arc::clone(&download_progress_shared);
+                                        if let Ok(mut g) = progress.lock() {
+                                            *g = Some(0.0);
+                                        }
+                                        app.download_progress = Some(0.0);
+                                        app.download_status = format!("Starting download of {}...", model_name);
+                                        app.node_error.clear();
+
+                                        let dl = ModelDownloader::new();
+                                        let name = model_name.clone();
+                                        let prog = Arc::clone(&download_progress_shared);
+                                        pending_download = Some(rt.spawn(async move {
+                                            dl.download(&name, move |pct| {
+                                                if let Ok(mut g) = prog.lock() {
+                                                    *g = Some(pct);
+                                                }
+                                            })
+                                            .await
+                                        }));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -131,12 +197,80 @@ fn main() -> Result<()> {
         }
     }
 
+    // Stop the node runner before exiting
+    node_runner.stop();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// Activate a model: update app state and start the inference server.
+fn activate_model(app: &mut App, node_runner: &mut NodeRunner, idx: usize, path: &PathBuf) {
+    let model_name = app.models[idx].name.clone();
+
+    // Update model list state
+    app.models[idx].installed = true;
+    for m in app.models.iter_mut() {
+        m.active = false;
+    }
+    app.models[idx].active = true;
+    app.current_model = model_name.clone();
+
+    // Start the inference server
+    match node_runner.start(&model_name, path) {
+        Ok(()) => {
+            app.node_running = true;
+            app.node_error.clear();
+            app.download_status = format!("{} is running on port {}", model_name, node_runner.port);
+        }
+        Err(e) => {
+            app.node_running = false;
+            app.node_error = e.to_string();
+            app.download_status = format!("Failed to start {}", model_name);
+        }
+    }
+}
+
+fn check_download(
+    rt: &tokio::runtime::Runtime,
+    pending: &mut Option<tokio::task::JoinHandle<Result<PathBuf>>>,
+    download_model_idx: &mut Option<usize>,
+    progress_shared: &Arc<Mutex<Option<f64>>>,
+    app: &mut App,
+    node_runner: &mut NodeRunner,
+) {
+    if let Some(handle) = pending.as_ref() {
+        if handle.is_finished() {
+            let handle = pending.take().unwrap();
+            let idx = download_model_idx.take();
+
+            // Clear shared progress
+            if let Ok(mut g) = progress_shared.lock() {
+                *g = None;
+            }
+            app.download_progress = None;
+
+            match rt.block_on(handle) {
+                Ok(Ok(path)) => {
+                    if let Some(idx) = idx {
+                        activate_model(app, node_runner, idx, &path);
+                    }
+                }
+                Ok(Err(e)) => {
+                    app.node_error = format!("Download failed: {}", e);
+                    app.download_status = "Download failed".into();
+                }
+                Err(e) => {
+                    app.node_error = format!("Download task error: {}", e);
+                    app.download_status = "Download failed".into();
+                }
+            }
+        }
+    }
 }
 
 fn check_balance(

@@ -40,10 +40,7 @@ fn handle_tab_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
             handle_dashboard_key(app, key);
             None
         }
-        Tab::Models => {
-            handle_models_key(app, key);
-            None
-        }
+        Tab::Models => handle_models_key(app, key),
         Tab::Wallet => handle_wallet_key(app, key),
         Tab::Settings => {
             handle_settings_key(app, key);
@@ -56,6 +53,7 @@ fn handle_tab_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
 pub enum ChatAction {
     SendMessage(String),
     RequestAirdrop,
+    SelectModel(usize),
 }
 
 fn handle_chat_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
@@ -107,7 +105,7 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_models_key(app: &mut App, key: KeyEvent) {
+fn handle_models_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
     match key.code {
         KeyCode::Up => {
             if app.selected_model_idx > 0 {
@@ -120,17 +118,16 @@ fn handle_models_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Enter => {
-            let idx = app.selected_model_idx;
-            // Install if not installed, then activate
-            app.models[idx].installed = true;
-            for m in app.models.iter_mut() {
-                m.active = false;
+            // Don't allow selecting while a download is in progress
+            if app.download_progress.is_some() {
+                return None;
             }
-            app.models[idx].active = true;
-            app.current_model = app.models[idx].name.clone();
+            let idx = app.selected_model_idx;
+            return Some(ChatAction::SelectModel(idx));
         }
         _ => {}
     }
+    None
 }
 
 fn handle_wallet_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {

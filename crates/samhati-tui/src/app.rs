@@ -113,6 +113,11 @@ pub struct App {
     pub wallet_status: String,    // status messages (airdrop, errors)
     pub tx_history: Vec<TxEntry>,
 
+    // Download / node state
+    pub download_progress: Option<f64>, // None = not downloading, Some(0-100) = progress
+    pub download_status: String,        // "Downloading Qwen2.5-3B... 45%"
+    pub node_error: String,             // error messages from node start
+
     // Settings
     pub api_endpoint: String,
     pub max_vram_gb: f64,
@@ -160,6 +165,10 @@ impl App {
             pending_rewards: 0.0,
             wallet_status: String::new(),
             tx_history: vec![], // populated from real Solana devnet
+
+            download_progress: None,
+            download_status: String::new(),
+            node_error: String::new(),
 
             api_endpoint: "http://localhost:8000".into(),
             max_vram_gb: 24.0,
