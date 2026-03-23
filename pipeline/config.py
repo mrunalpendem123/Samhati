@@ -48,7 +48,7 @@ class PipelineConfig:
 
     # Domains
     domains: list[str] = field(default_factory=lambda: [
-        "general", "hindi", "code-rust", "code-python",
+        "general", "code-rust", "code-python",
         "math", "science", "defi", "legal",
     ])
 

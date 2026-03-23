@@ -130,12 +130,12 @@ class TestStats:
         collector = SwarmRoundCollector(tmp_path, min_confidence=0.70)
         collector.collect_and_save(_make_round(domain="math"))
         collector.collect_and_save(_make_round(domain="math"))
-        collector.collect_and_save(_make_round(domain="hindi"))
+        collector.collect_and_save(_make_round(domain="science"))
 
         result = stats(tmp_path)
         assert result["total"] == 3
         assert result["domains"]["math"]["count"] == 2
-        assert result["domains"]["hindi"]["count"] == 1
+        assert result["domains"]["science"]["count"] == 1
 
 
 class TestTrainingExample:

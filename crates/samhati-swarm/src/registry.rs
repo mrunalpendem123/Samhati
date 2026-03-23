@@ -9,7 +9,7 @@ pub struct NodeInfo {
     pub node_id: NodeId,
     /// iroh connection address / endpoint.
     pub endpoint: String,
-    /// Model identifier, e.g. "samhati-hindi-3b-v2".
+    /// Model identifier, e.g. "samhati-rust-3b-v2".
     pub model_name: String,
     /// Model size in billions of parameters.
     pub model_size_b: u8,

@@ -207,7 +207,6 @@ fn detect_models() -> Vec<ModelInfo> {
         m("Gemma-3-4B", "4B", "General", 2.5, 6.0, "1.0x"),
 
         // ── Specialist SLMs (3B, domain-tuned) — whitepaper flywheel ──
-        m("Samhati-Hindi-3B", "3B", "Hindi", 1.8, 4.0, "1.5x"),
         m("Samhati-Rust-3B", "3B", "Rust", 1.8, 4.0, "1.5x"),
         m("Samhati-Python-3B", "3B", "Python", 1.8, 4.0, "1.5x"),
         m("Samhati-Math-3B", "3B", "Math", 1.8, 4.0, "1.5x"),

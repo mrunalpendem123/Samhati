@@ -50,7 +50,7 @@ fn draw_table(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let domain_color = match m.domain.as_str() {
-                "Hindi" | "Rust" | "Python" | "Math" | "DeFi" | "Science" | "Legal" => Color::Magenta,
+                "Rust" | "Python" | "Math" | "DeFi" | "Science" | "Legal" => Color::Magenta,
                 "Code" => Color::Cyan,
                 "Reasoning" => Color::Yellow,
                 "Medical" => Color::Red,

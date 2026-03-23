@@ -1,9 +1,4 @@
 domains:
-  hindi:
-    description: "Hindi language specialist"
-    base_model: "Qwen/Qwen2.5-3B"
-    keywords: ["hindi", "हिंदी", "devanagari"]
-    min_examples: 5000
   code-rust:
     description: "Rust programming specialist"
     base_model: "Qwen/Qwen2.5-3B"

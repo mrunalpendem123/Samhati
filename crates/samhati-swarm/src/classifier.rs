@@ -8,7 +8,7 @@ pub struct ComplexityResult {
     pub n_nodes: usize,
     /// Complexity tier.
     pub complexity: Complexity,
-    /// Detected domain tags (e.g. "code", "math", "hindi").
+    /// Detected domain tags (e.g. "code", "math", "science").
     pub domain_tags: Vec<String>,
     /// Classifier confidence in [0, 1].
     pub confidence: f32,
@@ -94,15 +94,6 @@ impl ComplexityClassifier {
             tier = tier.saturating_add(1).min(4);
         }
 
-        // --- Hindi / Indic language detection ---
-        let hindi_indicators = [
-            "कृपया", "बताइए", "समझाइए", "हिंदी", "हिन्दी",
-            "क्या", "कैसे", "क्यों", "मुझे", "यह",
-        ];
-        if hindi_indicators.iter().any(|s| prompt.contains(s)) {
-            domain_tags.push("hindi".into());
-        }
-
         // --- question complexity bump ---
         let question_marks = prompt.chars().filter(|&c| c == '?').count();
         if question_marks >= 3 {
@@ -181,12 +172,6 @@ mod tests {
         let r = classifier().classify("Explain how the borrow checker works in Rust and impl a struct with lifetimes");
         assert!(r.domain_tags.contains(&"rust".to_string()));
         assert!(r.domain_tags.contains(&"code".to_string()));
-    }
-
-    #[test]
-    fn hindi_detected() {
-        let r = classifier().classify("कृपया मुझे बताइए कि भारत की राजधानी क्या है");
-        assert!(r.domain_tags.contains(&"hindi".to_string()));
     }
 
     #[test]
