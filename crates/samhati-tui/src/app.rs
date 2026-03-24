@@ -103,6 +103,9 @@ pub struct App {
     pub tab: Tab,
     pub running: bool,
 
+    // Unified identity
+    pub node_id: String, // iroh NodeId (hex-encoded Ed25519 pubkey)
+
     // Chat state
     pub chat_input: String,
     pub chat_messages: Vec<ChatMessage>,
@@ -142,6 +145,10 @@ pub struct App {
     pub swarm_nodes: Vec<SwarmNodeDisplay>,
     pub last_round_result: Option<SwarmRoundDisplay>,
 
+    // Remote node input (Models tab: press 'r' to add friend's node)
+    pub adding_remote_node: bool,
+    pub remote_url_input: String,
+
     // Settings
     pub api_endpoint: String,
     pub max_vram_gb: f64,
@@ -155,6 +162,8 @@ impl App {
         Self {
             tab: Tab::Chat,
             running: true,
+
+            node_id: String::new(),
 
             chat_input: String::new(),
             chat_messages: vec![
@@ -196,6 +205,9 @@ impl App {
 
             swarm_nodes: Vec::new(),
             last_round_result: None,
+
+            adding_remote_node: false,
+            remote_url_input: String::new(),
 
             api_endpoint: "http://localhost:8000".into(),
             max_vram_gb: 24.0,

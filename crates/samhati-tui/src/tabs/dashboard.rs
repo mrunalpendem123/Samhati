@@ -227,26 +227,28 @@ fn draw_node_info(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("STOPPED", Style::default().fg(Color::Red).bold())
     };
 
+    let node_id_display = if app.node_id.len() > 16 {
+        format!("{}...{}", &app.node_id[..8], &app.node_id[app.node_id.len() - 8..])
+    } else if app.node_id.is_empty() {
+        "loading...".into()
+    } else {
+        app.node_id.clone()
+    };
+
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Node Status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Status:   ", Style::default().fg(Color::DarkGray)),
             status_indicator,
-            Span::styled(
-                "    (press 's' to toggle)",
-                Style::default().fg(Color::DarkGray),
-            ),
         ]),
         Line::from(vec![
-            Span::styled("  Endpoint:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&app.api_endpoint, Style::default().fg(Color::White)),
+            Span::styled("  Node ID:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(node_id_display, Style::default().fg(Color::Cyan)),
+            Span::styled("  (Solana + iroh + TOPLOC — same key)", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(vec![
-            Span::styled("  VRAM Alloc:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{:.1} GB", app.max_vram_gb),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled("  Wallet:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&app.wallet_short, Style::default().fg(Color::Yellow)),
         ]),
     ];
 

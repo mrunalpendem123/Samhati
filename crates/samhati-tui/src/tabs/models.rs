@@ -141,7 +141,7 @@ fn draw_footer(
     let mut chunk_idx = 0;
 
     // Help bar
-    draw_help(frame, chunks[chunk_idx]);
+    draw_help(frame, app, chunks[chunk_idx]);
     chunk_idx += 1;
 
     // Download progress gauge
@@ -184,24 +184,42 @@ fn draw_footer(
     }
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled(" ↑/↓ ", Style::default().fg(PURPLE).bold()),
-        Span::styled("select  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(" Enter ", Style::default().fg(PURPLE).bold()),
-        Span::styled("download & activate  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(" s ", Style::default().fg(PURPLE).bold()),
-        Span::styled("add to swarm  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(" ★ ", Style::default().fg(Color::Cyan).bold()),
-        Span::styled("= fits your RAM  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(" 1.5x+ ", Style::default().fg(Color::Green).bold()),
-        Span::styled("= domain specialist bonus", Style::default().fg(Color::DarkGray)),
-    ]))
-    .block(
-        Block::bordered()
-            .border_style(Style::default().fg(DIM_PURPLE))
-            .style(Style::default().bg(SURFACE)),
-    );
-
-    frame.render_widget(help, area);
+fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+    if app.adding_remote_node {
+        // Show peer connect input bar
+        let input = Paragraph::new(Line::from(vec![
+            Span::styled(" Node ID: ", Style::default().fg(PURPLE).bold()),
+            Span::styled(&app.remote_url_input, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::White)),
+        ]))
+        .block(
+            Block::bordered()
+                .title(Span::styled(
+                    " Connect to Friend (paste their Node ID, Enter to connect, Esc to cancel) ",
+                    Style::default().fg(Color::Green),
+                ))
+                .border_style(Style::default().fg(Color::Green))
+                .style(Style::default().bg(SURFACE)),
+        );
+        frame.render_widget(input, area);
+    } else {
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled(" ↑/↓ ", Style::default().fg(PURPLE).bold()),
+            Span::styled("select  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Enter ", Style::default().fg(PURPLE).bold()),
+            Span::styled("download & activate  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" s ", Style::default().fg(PURPLE).bold()),
+            Span::styled("add to swarm  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" r ", Style::default().fg(Color::Green).bold()),
+            Span::styled("connect friend  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" ★ ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled("= fits RAM", Style::default().fg(Color::DarkGray)),
+        ]))
+        .block(
+            Block::bordered()
+                .border_style(Style::default().fg(DIM_PURPLE))
+                .style(Style::default().bg(SURFACE)),
+        );
+        frame.render_widget(help, area);
+    }
 }

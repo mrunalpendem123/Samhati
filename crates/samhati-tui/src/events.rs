@@ -54,7 +54,9 @@ pub enum ChatAction {
     SendMessage(String),
     RequestAirdrop,
     SelectModel(usize),
-    AddSwarmNode(usize), // Start model on next available port and add to swarm
+    AddSwarmNode(usize),        // Start local model on next port and add to swarm
+    AddRemoteNode(String),      // Add friend's node by URL (e.g. http://192.168.1.5:8080)
+    ConnectPeer(String),        // Connect to a friend by iroh NodeId (auto-discovery)
 }
 
 fn handle_chat_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
@@ -107,6 +109,11 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_models_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
+    // If entering a remote URL, route input there
+    if app.adding_remote_node {
+        return handle_remote_url_input(app, key);
+    }
+
     match key.code {
         KeyCode::Up => {
             if app.selected_model_idx > 0 {
@@ -133,6 +140,44 @@ fn handle_models_key(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
             }
             let idx = app.selected_model_idx;
             return Some(ChatAction::AddSwarmNode(idx));
+        }
+        KeyCode::Char('r') => {
+            // Connect to a friend by their NodeId (from their Dashboard)
+            app.adding_remote_node = true;
+            app.remote_url_input.clear();
+            app.download_status = "Paste friend's Node ID (from their Dashboard tab)".into();
+        }
+        _ => {}
+    }
+    None
+}
+
+fn handle_remote_url_input(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
+    match key.code {
+        KeyCode::Esc => {
+            app.adding_remote_node = false;
+            app.remote_url_input.clear();
+            app.download_status.clear();
+        }
+        KeyCode::Enter => {
+            let input = app.remote_url_input.trim().to_string();
+            app.adding_remote_node = false;
+            app.remote_url_input.clear();
+            if !input.is_empty() {
+                if input.starts_with("http") {
+                    // Direct URL (legacy — works on LAN)
+                    return Some(ChatAction::AddRemoteNode(input));
+                } else {
+                    // iroh NodeId — auto-connect via P2P
+                    return Some(ChatAction::ConnectPeer(input));
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.remote_url_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.remote_url_input.push(c);
         }
         _ => {}
     }

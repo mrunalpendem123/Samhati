@@ -70,11 +70,40 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::White)
         };
 
+        let wrap_width = inner.width.saturating_sub(prefix.len() as u16 + 1) as usize;
         for text_line in msg.content.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("{}{}", prefix, text_line),
-                content_style,
-            )));
+            if wrap_width == 0 || text_line.len() <= wrap_width {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", prefix, text_line),
+                    content_style,
+                )));
+            } else {
+                // Word-wrap long lines
+                let continuation = " ".repeat(prefix.len());
+                let mut remaining = text_line;
+                let mut first = true;
+                while !remaining.is_empty() {
+                    let p = if first { prefix } else { &continuation };
+                    first = false;
+                    if remaining.len() <= wrap_width {
+                        lines.push(Line::from(Span::styled(
+                            format!("{}{}", p, remaining),
+                            content_style,
+                        )));
+                        break;
+                    }
+                    // Find last space within wrap_width for word boundary
+                    let split = remaining[..wrap_width]
+                        .rfind(' ')
+                        .unwrap_or(wrap_width);
+                    let (chunk, rest) = remaining.split_at(split);
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{}", p, chunk),
+                        content_style,
+                    )));
+                    remaining = rest.trim_start();
+                }
+            }
         }
     }
 

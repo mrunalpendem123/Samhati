@@ -1,7 +1,9 @@
 mod app;
 mod api;
 mod events;
+pub mod identity;
 mod model_download;
+pub mod network;
 mod node_runner;
 mod swarm;
 mod tabs;
@@ -24,7 +26,9 @@ use ratatui::prelude::*;
 use app::{App, ChatMessage, SwarmNodeDisplay, SwarmRoundDisplay};
 use api::ApiClient;
 use events::{ChatAction, handle_key, poll_event};
+use identity::NodeIdentity;
 use model_download::ModelDownloader;
+use network::{NetworkHandle, NodeAnnouncement};
 use node_runner::{NodeRunner, MultiNodeRunner};
 use swarm::SwarmOrchestrator;
 use wallet::SolanaWallet;
@@ -41,16 +45,32 @@ fn main() -> Result<()> {
 
     let mut app = App::new();
 
-    // Load real Solana wallet
-    match SolanaWallet::load_or_create() {
-        Ok(w) => {
-            app.wallet_pubkey = w.pubkey.clone();
-            app.wallet_short = w.short_pubkey();
+    // Load unified identity — one Ed25519 key for Solana + iroh + TOPLOC
+    let mut identity_secret: Option<[u8; 32]> = None;
+    match NodeIdentity::load_or_create() {
+        Ok(id) => {
+            app.wallet_pubkey = id.solana_pubkey.clone();
+            app.wallet_short = id.short_id.clone();
+            app.node_id = id.iroh_node_id.clone();
+            identity_secret = Some(id.secret_key);
+
+            // Create Solana wallet from the same identity
+            let w = SolanaWallet {
+                pubkey: id.solana_pubkey.clone(),
+                keypair_path: id.path.clone(),
+                secret_bytes: {
+                    let mut bytes = Vec::with_capacity(64);
+                    bytes.extend_from_slice(&id.secret_key);
+                    bytes.extend_from_slice(&id.public_key);
+                    bytes
+                },
+            };
             app.wallet = Some(w);
         }
         Err(e) => {
             app.wallet_pubkey = format!("Error: {}", e);
             app.wallet_short = "no wallet".into();
+            app.node_id = String::new();
         }
     }
 
@@ -58,6 +78,23 @@ fn main() -> Result<()> {
     let mut node_runner = NodeRunner::new();
     let mut multi_runner = MultiNodeRunner::new();
     let swarm = Arc::new(SwarmOrchestrator::new());
+
+    // Start P2P network — auto-discover other Samhati nodes via iroh gossip
+    let mut net_handle: Option<NetworkHandle> = None;
+    if let Some(secret) = identity_secret {
+        match NetworkHandle::start(secret) {
+            Ok(nh) => {
+                app.node_id = nh.node_id.clone();
+                app.download_status = format!(
+                    "P2P active — share your Node ID with friends to connect",
+                );
+                net_handle = Some(nh);
+            }
+            Err(e) => {
+                app.node_error = format!("P2P network failed: {}", e);
+            }
+        }
+    }
 
     let tick_rate = Duration::from_millis(33);
 
@@ -76,6 +113,35 @@ fn main() -> Result<()> {
     while app.running {
         // Draw
         terminal.draw(|frame| ui::draw(frame, &app))?;
+
+        // Check for newly discovered P2P peers and auto-add to swarm
+        if let Some(ref nh) = net_handle {
+            while let Ok(peer) = nh.peer_rx.try_recv() {
+                // Auto-add discovered peer to swarm orchestrator
+                let node_id = format!("p2p-{}",
+                    peer.iroh_node_id.get(..8).unwrap_or(&peer.iroh_node_id));
+                swarm.add_node(
+                    node_id.clone(),
+                    peer.inference_url.clone(),
+                    peer.model_name.clone(),
+                );
+                app.swarm_nodes.push(SwarmNodeDisplay {
+                    id: node_id.clone(),
+                    url: peer.inference_url.clone(),
+                    model: peer.model_name.clone(),
+                    elo: 1500,
+                    rounds: 0,
+                    wins: 0,
+                });
+                app.peers_connected = swarm.node_count() as u32;
+                app.download_status = format!(
+                    "Discovered peer {} running {} ({} nodes)",
+                    peer.iroh_node_id.get(..12).unwrap_or(&peer.iroh_node_id),
+                    peer.model_name,
+                    swarm.node_count(),
+                );
+            }
+        }
 
         // Periodic refresh: check balance, health, txs every 15 seconds
         if last_refresh.elapsed() > Duration::from_secs(15) {
@@ -137,6 +203,7 @@ fn main() -> Result<()> {
             &download_progress_shared,
             &mut app,
             &mut node_runner,
+            &net_handle,
         );
 
         // Poll events
@@ -179,7 +246,7 @@ fn main() -> Result<()> {
                                     if downloader.is_downloaded(&model_name) {
                                         // Already downloaded — just start the node
                                         let path = downloader.model_path(&model_name);
-                                        activate_model(&mut app, &mut node_runner, idx, &path);
+                                        activate_model(&mut app, &mut node_runner, idx, &path, &net_handle);
                                     } else {
                                         // Kick off async download
                                         download_model_idx = Some(idx);
@@ -240,6 +307,38 @@ fn main() -> Result<()> {
                                     );
                                 }
                             }
+                            ChatAction::AddRemoteNode(url) => {
+                                // Add a friend's remote llama-server by direct URL
+                                let node_id = format!("remote-{}", swarm.node_count() + 1);
+                                swarm.add_node(node_id.clone(), url.clone(), "remote".into());
+                                app.swarm_nodes.push(SwarmNodeDisplay {
+                                    id: node_id,
+                                    url: url.clone(),
+                                    model: "remote".into(),
+                                    elo: 1500,
+                                    rounds: 0,
+                                    wins: 0,
+                                });
+                                app.peers_connected = swarm.node_count() as u32;
+                                app.download_status = format!(
+                                    "Remote node added: {} ({} nodes total)",
+                                    url, swarm.node_count()
+                                );
+                                app.node_error.clear();
+                            }
+                            ChatAction::ConnectPeer(peer_node_id) => {
+                                // Connect to a friend via iroh P2P (by NodeId)
+                                if let Some(ref nh) = net_handle {
+                                    nh.add_bootstrap(peer_node_id.clone());
+                                    app.download_status = format!(
+                                        "Connecting to peer {}... (will auto-add when they announce)",
+                                        peer_node_id.get(..16).unwrap_or(&peer_node_id),
+                                    );
+                                    app.node_error.clear();
+                                } else {
+                                    app.node_error = "P2P network not running".into();
+                                }
+                            }
                         }
                     }
                 }
@@ -259,8 +358,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Activate a model: update app state and start the inference server.
-fn activate_model(app: &mut App, node_runner: &mut NodeRunner, idx: usize, path: &PathBuf) {
+/// Activate a model: update app state, start inference server, announce to P2P network.
+fn activate_model(
+    app: &mut App,
+    node_runner: &mut NodeRunner,
+    idx: usize,
+    path: &PathBuf,
+    net_handle: &Option<NetworkHandle>,
+) {
     let model_name = app.models[idx].name.clone();
 
     // Update model list state
@@ -277,6 +382,17 @@ fn activate_model(app: &mut App, node_runner: &mut NodeRunner, idx: usize, path:
             app.node_running = true;
             app.node_error.clear();
             app.download_status = format!("{} is running on port {}", model_name, node_runner.port);
+
+            // Announce to P2P network so other nodes can discover us
+            if let Some(ref nh) = net_handle {
+                nh.set_announcement(NodeAnnouncement {
+                    solana_pubkey: app.wallet_pubkey.clone(),
+                    iroh_node_id: app.node_id.clone(),
+                    inference_url: format!("http://127.0.0.1:{}", node_runner.port),
+                    model_name: model_name.clone(),
+                    port: node_runner.port,
+                });
+            }
         }
         Err(e) => {
             app.node_running = false;
@@ -293,6 +409,7 @@ fn check_download(
     progress_shared: &Arc<Mutex<Option<f64>>>,
     app: &mut App,
     node_runner: &mut NodeRunner,
+    net_handle: &Option<NetworkHandle>,
 ) {
     if let Some(handle) = pending.as_ref() {
         if handle.is_finished() {
@@ -308,7 +425,7 @@ fn check_download(
             match rt.block_on(handle) {
                 Ok(Ok(path)) => {
                     if let Some(idx) = idx {
-                        activate_model(app, node_runner, idx, &path);
+                        activate_model(app, node_runner, idx, &path, net_handle);
                     }
                 }
                 Ok(Err(e)) => {

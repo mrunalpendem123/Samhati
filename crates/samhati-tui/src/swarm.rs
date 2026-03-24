@@ -24,6 +24,7 @@ pub struct SwarmRoundResult {
     pub elo_updates: Vec<(String, i32)>,
     pub n_nodes: usize,
     pub total_time_ms: u64,
+    pub rankings: Vec<PairwiseResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,10 +35,25 @@ pub struct NodeAnswer {
     pub model: String,
 }
 
+/// Result of one pairwise comparison by a ranking node.
+#[derive(Debug, Clone)]
+pub struct PairwiseResult {
+    pub ranker_node_id: String,
+    pub answer_a_idx: usize,
+    pub answer_b_idx: usize,
+    /// 1.0 = A wins, 0.0 = B wins, 0.5 = tie
+    pub preference: f64,
+    pub reasoning: String,
+}
+
 /// The swarm orchestrator — manages nodes and coordinates inference.
 ///
-/// Uses `Arc<Mutex<..>>` for the node list so that `infer()` can take `&self`
-/// (required because the orchestrator is held across `.await` points in main).
+/// Implements the Fortytwo peer-ranked consensus protocol:
+///   Phase 1: Fan out prompt to N nodes, collect answers
+///   Phase 2: Send all answers back to each node for LLM-based pairwise ranking
+///            (each node excluded from ranking its own answer)
+///   Phase 3: BradleyTerry aggregation on real pairwise preferences
+///   Phase 4: ELO update
 pub struct SwarmOrchestrator {
     nodes: Arc<Mutex<Vec<SwarmNode>>>,
     client: reqwest::Client,
@@ -54,7 +70,6 @@ impl SwarmOrchestrator {
         }
     }
 
-    /// Register a node endpoint.
     pub fn add_node(&self, id: String, url: String, model: String) {
         if let Ok(mut nodes) = self.nodes.lock() {
             nodes.push(SwarmNode {
@@ -68,24 +83,21 @@ impl SwarmOrchestrator {
         }
     }
 
-    /// Remove a node by id.
     pub fn remove_node(&self, id: &str) {
         if let Ok(mut nodes) = self.nodes.lock() {
             nodes.retain(|n| n.id != id);
         }
     }
 
-    /// Get number of active nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.lock().map(|n| n.len()).unwrap_or(0)
     }
 
-    /// Snapshot of current nodes (for display).
     pub fn snapshot_nodes(&self) -> Vec<SwarmNode> {
         self.nodes.lock().map(|n| n.clone()).unwrap_or_default()
     }
 
-    /// Run swarm inference: fan out to all nodes, collect answers, BradleyTerry rank.
+    /// Run swarm inference with real peer-ranked consensus.
     pub async fn infer(&self, prompt: &str) -> Result<SwarmRoundResult> {
         let node_snapshot = {
             let guard = self.nodes.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
@@ -99,7 +111,7 @@ impl SwarmOrchestrator {
         let start = Instant::now();
         let n_nodes = node_snapshot.len();
 
-        // Phase 1: Fan out — send prompt to all nodes in parallel
+        // ── Phase 1: Fan out — send prompt to all nodes in parallel ──────
         let mut handles = Vec::new();
         for node in &node_snapshot {
             let client = self.client.clone();
@@ -116,7 +128,6 @@ impl SwarmOrchestrator {
             }));
         }
 
-        // Collect all answers
         let mut answers: Vec<NodeAnswer> = Vec::new();
         for handle in handles {
             match handle.await {
@@ -141,7 +152,7 @@ impl SwarmOrchestrator {
             return Err(anyhow::anyhow!("All nodes failed to respond"));
         }
 
-        // If only 1 answer, return it directly
+        // Single answer — return directly
         if answers.len() == 1 {
             let winner = &answers[0];
             return Ok(SwarmRoundResult {
@@ -152,23 +163,35 @@ impl SwarmOrchestrator {
                 elo_updates: vec![],
                 n_nodes,
                 total_time_ms: start.elapsed().as_millis() as u64,
+                rankings: vec![],
             });
         }
 
-        // Phase 2: Score answers using quality heuristics
-        let scores = rank_answers(&answers);
+        // ── Phase 2: Peer ranking — each node judges all pairs using its LLM ──
+        // Each node ranks C(N,2) pairs, excluding comparisons of its own answer.
+        // This is the Fortytwo mechanism: nodes see all answers and produce
+        // 50-100 token reasoning chains for each pairwise comparison.
+        let rankings = self
+            .peer_rank(&node_snapshot, &answers, prompt)
+            .await;
 
-        // Phase 3: BradleyTerry aggregation — pick winner
-        let (winner_idx, confidence) = bradley_terry_select(&scores);
+        // ── Phase 3: BradleyTerry aggregation on real pairwise preferences ──
+        let n = answers.len();
+        let (winner_idx, confidence) = if rankings.is_empty() {
+            // Fallback to heuristic if all ranking calls failed
+            let scores = heuristic_scores(&answers);
+            heuristic_bt_select(&scores)
+        } else {
+            bradley_terry_aggregate(&rankings, n)
+        };
+
         let winner = &answers[winner_idx];
 
-        // Phase 4: ELO updates (mutate shared state)
+        // ── Phase 4: ELO updates ──
         let elo_updates = {
             let mut guard = self.nodes.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
             update_elo(&mut guard, &answers, winner_idx)
         };
-
-        let total_time = start.elapsed().as_millis() as u64;
 
         Ok(SwarmRoundResult {
             winner_id: winner.node_id.clone(),
@@ -177,12 +200,208 @@ impl SwarmOrchestrator {
             all_answers: answers,
             elo_updates,
             n_nodes,
-            total_time_ms: total_time,
+            total_time_ms: start.elapsed().as_millis() as u64,
+            rankings,
         })
+    }
+
+    /// Phase 2: Send all answers to each node for LLM-based pairwise ranking.
+    ///
+    /// For each ranking node, generate all C(N,2) pairs where the node is NOT
+    /// the author of either answer (preventing self-promotion bias).
+    /// Each node's LLM produces a preference + reasoning chain.
+    async fn peer_rank(
+        &self,
+        nodes: &[SwarmNode],
+        answers: &[NodeAnswer],
+        original_prompt: &str,
+    ) -> Vec<PairwiseResult> {
+        let n = answers.len();
+        let mut handles = Vec::new();
+
+        for node in nodes {
+            // Generate all pairs, excluding this node's own answer
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    // Skip if this node authored either answer
+                    if answers[i].node_id == node.id || answers[j].node_id == node.id {
+                        continue;
+                    }
+
+                    let client = self.client.clone();
+                    let ranker_url = node.url.clone();
+                    let ranker_id = node.id.clone();
+                    let answer_a = answers[i].answer.clone();
+                    let answer_b = answers[j].answer.clone();
+                    let prompt = original_prompt.to_string();
+                    let idx_a = i;
+                    let idx_b = j;
+
+                    handles.push(tokio::spawn(async move {
+                        let result = ask_node_to_rank(
+                            &client, &ranker_url, &prompt, &answer_a, &answer_b,
+                        )
+                        .await;
+                        (ranker_id, idx_a, idx_b, result)
+                    }));
+                }
+            }
+        }
+
+        let mut rankings = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok((ranker_id, idx_a, idx_b, Ok((preference, reasoning)))) => {
+                    rankings.push(PairwiseResult {
+                        ranker_node_id: ranker_id,
+                        answer_a_idx: idx_a,
+                        answer_b_idx: idx_b,
+                        preference,
+                        reasoning,
+                    });
+                }
+                Ok((ranker_id, _, _, Err(e))) => {
+                    eprintln!("Ranking by {} failed: {}", ranker_id, e);
+                }
+                Err(e) => {
+                    eprintln!("Ranking task error: {}", e);
+                }
+            }
+        }
+
+        rankings
     }
 }
 
-/// Call a single node's OpenAI-compatible chat endpoint.
+/// Ask a node's LLM to compare two answers and pick a winner with reasoning.
+///
+/// The node receives a structured prompt with the original question and both
+/// answers (labeled A and B). It must respond with a JSON object containing
+/// the winner ("A" or "B") and a reasoning chain (50-100 tokens).
+async fn ask_node_to_rank(
+    client: &reqwest::Client,
+    ranker_url: &str,
+    original_prompt: &str,
+    answer_a: &str,
+    answer_b: &str,
+) -> Result<(f64, String)> {
+    // Truncate answers to keep ranking prompt short and fast
+    let max_chars = 600;
+    let a_short: String = answer_a.chars().take(max_chars).collect();
+    let b_short: String = answer_b.chars().take(max_chars).collect();
+
+    let ranking_prompt = format!(
+        r#"Compare these two answers. Which is better? Reply ONLY with JSON, nothing else.
+
+Q: {original_prompt}
+
+A: {a_short}
+
+B: {b_short}
+
+{{"winner":"A" or "B","reasoning":"one sentence why"}}"#
+    );
+
+    #[derive(Serialize)]
+    struct Req {
+        model: String,
+        messages: Vec<Msg>,
+        max_tokens: u32,
+        temperature: f32,
+    }
+    #[derive(Serialize)]
+    struct Msg {
+        role: String,
+        content: String,
+    }
+
+    let req = Req {
+        model: "default".into(),
+        messages: vec![Msg {
+            role: "user".into(),
+            content: ranking_prompt,
+        }],
+        max_tokens: 60, // short — just need winner + one sentence
+        temperature: 0.1, // low temp for consistent judging
+    };
+
+    #[derive(Deserialize)]
+    struct Resp {
+        choices: Vec<Choice>,
+    }
+    #[derive(Deserialize)]
+    struct Choice {
+        message: ChoiceMsg,
+    }
+    #[derive(Deserialize)]
+    struct ChoiceMsg {
+        content: String,
+    }
+
+    let resp: Resp = client
+        .post(format!(
+            "{}/v1/chat/completions",
+            ranker_url.trim_end_matches('/')
+        ))
+        .json(&req)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let content = resp
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+
+    parse_ranking_response(&content)
+}
+
+/// Parse the LLM's ranking response. Extracts winner and reasoning.
+/// Handles both clean JSON and messy LLM output gracefully.
+fn parse_ranking_response(content: &str) -> Result<(f64, String)> {
+    // Try JSON parse first
+    #[derive(Deserialize)]
+    struct RankJson {
+        winner: String,
+        reasoning: Option<String>,
+    }
+
+    // Strip markdown code fences if present
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if let Ok(parsed) = serde_json::from_str::<RankJson>(cleaned) {
+        let preference = match parsed.winner.trim().to_uppercase().as_str() {
+            "A" => 1.0,
+            "B" => 0.0,
+            _ => 0.5,
+        };
+        let reasoning = parsed.reasoning.unwrap_or_else(|| parsed.winner.clone());
+        return Ok((preference, reasoning));
+    }
+
+    // Fallback: look for "A" or "B" in the raw text
+    let upper = content.to_uppercase();
+    let has_a = upper.contains("ANSWER A") || upper.contains("\"A\"") || upper.contains("WINNER: A");
+    let has_b = upper.contains("ANSWER B") || upper.contains("\"B\"") || upper.contains("WINNER: B");
+
+    let preference = match (has_a, has_b) {
+        (true, false) => 1.0,
+        (false, true) => 0.0,
+        _ => 0.5, // ambiguous → tie
+    };
+
+    Ok((preference, content.chars().take(200).collect()))
+}
+
+/// Call a single node's OpenAI-compatible chat endpoint for inference.
 async fn call_node(client: &reqwest::Client, base_url: &str, prompt: &str) -> Result<String> {
     #[derive(Serialize)]
     struct Req {
@@ -237,8 +456,70 @@ async fn call_node(client: &reqwest::Client, base_url: &str, prompt: &str) -> Re
         .ok_or_else(|| anyhow::anyhow!("Empty response from node"))
 }
 
-/// Score each answer using quality heuristics.
-fn rank_answers(answers: &[NodeAnswer]) -> Vec<f64> {
+/// BradleyTerry MLE aggregation from real pairwise rankings.
+///
+/// Uses iterative proportional fitting (MM algorithm):
+///   p_i ← wins_i / Σ_j (games_ij / (p_i + p_j))
+/// Runs 50 iterations, returns (winner_idx, confidence).
+fn bradley_terry_aggregate(rankings: &[PairwiseResult], n: usize) -> (usize, f32) {
+    if n == 0 {
+        return (0, 0.0);
+    }
+    if n == 1 {
+        return (0, 1.0);
+    }
+
+    // Accumulate wins and games from pairwise results
+    let mut wins = vec![0.0f64; n];
+    let mut games = vec![vec![0.0f64; n]; n];
+
+    for r in rankings {
+        let a = r.answer_a_idx;
+        let b = r.answer_b_idx;
+        if a >= n || b >= n {
+            continue;
+        }
+        wins[a] += r.preference;
+        wins[b] += 1.0 - r.preference;
+        games[a][b] += 1.0;
+        games[b][a] += 1.0;
+    }
+
+    // IPF iterations
+    let mut p = vec![1.0 / n as f64; n];
+    for _ in 0..50 {
+        let mut new_p = vec![0.0f64; n];
+        for i in 0..n {
+            let mut denom = 0.0f64;
+            for j in 0..n {
+                if i == j || games[i][j] == 0.0 {
+                    continue;
+                }
+                denom += games[i][j] / (p[i] + p[j]);
+            }
+            new_p[i] = if denom > 0.0 { wins[i] / denom } else { p[i] };
+        }
+        let sum: f64 = new_p.iter().sum();
+        if sum > 0.0 {
+            for v in &mut new_p {
+                *v /= sum;
+            }
+        }
+        p = new_p;
+    }
+
+    // Winner = argmax(p)
+    let (winner_idx, &max_p) = p
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((0, &0.0));
+
+    (winner_idx, max_p as f32)
+}
+
+/// Fallback heuristic scoring (used only when all LLM ranking calls fail).
+fn heuristic_scores(answers: &[NodeAnswer]) -> Vec<f64> {
     answers
         .iter()
         .map(|a| {
@@ -258,44 +539,29 @@ fn rank_answers(answers: &[NodeAnswer]) -> Vec<f64> {
             };
             let sentences = text.matches(". ").count() as f64;
             let paragraphs = text.matches("\n\n").count() as f64 * 3.0;
-            // Penalize very short answers
             let brevity_penalty = if text.len() < 50 { -10.0 } else { 0.0 };
-            // Penalize latency (faster is better, mild)
             let latency_penalty = -(a.latency_ms as f64 / 10000.0);
-
-            len_score
-                + has_code
-                + has_list
-                + has_numbers
-                + sentences
-                + paragraphs
-                + brevity_penalty
-                + latency_penalty
+            len_score + has_code + has_list + has_numbers + sentences + paragraphs
+                + brevity_penalty + latency_penalty
         })
         .collect()
 }
 
-/// Bradley-Terry selection: convert scores to probabilities, pick winner.
-fn bradley_terry_select(scores: &[f64]) -> (usize, f32) {
+/// Fallback BradleyTerry from heuristic scores (not pairwise).
+fn heuristic_bt_select(scores: &[f64]) -> (usize, f32) {
     if scores.is_empty() {
         return (0, 0.0);
     }
-
-    // Convert to exponential scale (Bradley-Terry model)
     let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let exp_scores: Vec<f64> = scores.iter().map(|s| (s - max_score).exp()).collect();
     let sum: f64 = exp_scores.iter().sum();
-
-    let probabilities: Vec<f64> = exp_scores.iter().map(|e| e / sum).collect();
-
-    // Winner = argmax
-    let (winner_idx, &max_prob) = probabilities
+    let probs: Vec<f64> = exp_scores.iter().map(|e| e / sum).collect();
+    let (idx, &p) = probs
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or((0, &0.0));
-
-    (winner_idx, max_prob as f32)
+    (idx, p as f32)
 }
 
 /// Update ELO scores for all participating nodes.
@@ -304,7 +570,6 @@ fn update_elo(
     answers: &[NodeAnswer],
     winner_idx: usize,
 ) -> Vec<(String, i32)> {
-    // Compute average elo across participating nodes only
     let participating_elos: Vec<f64> = answers
         .iter()
         .filter_map(|a| nodes.iter().find(|n| n.id == a.node_id).map(|n| n.elo as f64))
@@ -323,12 +588,9 @@ fn update_elo(
 
             let k = if node.rounds_played < 30 { 32 } else { 16 };
             let actual = if i == winner_idx { 1.0 } else { 0.0 };
-
-            // Expected score vs field average
             let expected = 1.0 / (1.0 + 10.0_f64.powf((avg_elo - node.elo as f64) / 400.0));
-
             let delta = (k as f64 * (actual - expected)).round() as i32;
-            node.elo = (node.elo + delta).max(100); // Floor at 100
+            node.elo = (node.elo + delta).max(100);
 
             if i == winner_idx {
                 node.rounds_won += 1;
@@ -346,37 +608,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bradley_terry_select_single() {
-        let scores = vec![5.0];
-        let (idx, conf) = bradley_terry_select(&scores);
+    fn test_bradley_terry_aggregate_single() {
+        let (idx, conf) = bradley_terry_aggregate(&[], 1);
         assert_eq!(idx, 0);
         assert!((conf - 1.0).abs() < 0.001);
     }
 
     #[test]
-    fn test_bradley_terry_select_clear_winner() {
-        let scores = vec![1.0, 10.0, 2.0];
-        let (idx, conf) = bradley_terry_select(&scores);
-        assert_eq!(idx, 1);
-        assert!(conf > 0.5);
+    fn test_bradley_terry_aggregate_clear_winner() {
+        // A always beats B in all rankings
+        let rankings = vec![
+            PairwiseResult {
+                ranker_node_id: "r1".into(),
+                answer_a_idx: 0,
+                answer_b_idx: 1,
+                preference: 1.0,
+                reasoning: "A is better".into(),
+            },
+            PairwiseResult {
+                ranker_node_id: "r2".into(),
+                answer_a_idx: 0,
+                answer_b_idx: 1,
+                preference: 1.0,
+                reasoning: "A is better".into(),
+            },
+        ];
+        let (idx, conf) = bradley_terry_aggregate(&rankings, 2);
+        assert_eq!(idx, 0);
+        assert!(conf > 0.8);
     }
 
     #[test]
-    fn test_rank_answers_prefers_longer() {
-        let short = NodeAnswer {
-            node_id: "a".into(),
-            answer: "ok".into(),
-            latency_ms: 100,
-            model: "m".into(),
-        };
-        let long = NodeAnswer {
-            node_id: "b".into(),
-            answer: "This is a much longer and more detailed answer that explains things properly. It has multiple sentences. And provides context.".into(),
-            latency_ms: 100,
-            model: "m".into(),
-        };
-        let scores = rank_answers(&[short, long]);
-        assert!(scores[1] > scores[0]);
+    fn test_bradley_terry_aggregate_close_race() {
+        // Mixed preferences
+        let rankings = vec![
+            PairwiseResult {
+                ranker_node_id: "r1".into(),
+                answer_a_idx: 0,
+                answer_b_idx: 1,
+                preference: 0.6,
+                reasoning: "A slightly better".into(),
+            },
+            PairwiseResult {
+                ranker_node_id: "r2".into(),
+                answer_a_idx: 0,
+                answer_b_idx: 1,
+                preference: 0.4,
+                reasoning: "B slightly better".into(),
+            },
+        ];
+        let (_, conf) = bradley_terry_aggregate(&rankings, 2);
+        // Should be close to 0.5 — neither dominates
+        assert!(conf < 0.7);
+    }
+
+    #[test]
+    fn test_parse_ranking_json() {
+        let (pref, _) =
+            parse_ranking_response(r#"{"winner": "A", "reasoning": "A is more detailed"}"#)
+                .unwrap();
+        assert!((pref - 1.0).abs() < 0.001);
+
+        let (pref, _) =
+            parse_ranking_response(r#"{"winner": "B", "reasoning": "B is correct"}"#).unwrap();
+        assert!(pref.abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_ranking_markdown_fenced() {
+        let input = "```json\n{\"winner\": \"A\", \"reasoning\": \"better\"}\n```";
+        let (pref, _) = parse_ranking_response(input).unwrap();
+        assert!((pref - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_ranking_fallback() {
+        let (pref, _) = parse_ranking_response("I think Answer A is clearly better").unwrap();
+        assert!((pref - 1.0).abs() < 0.001);
+
+        let (pref, _) = parse_ranking_response("Answer B wins this comparison").unwrap();
+        assert!(pref.abs() < 0.001);
     }
 
     #[test]
@@ -414,7 +725,6 @@ mod tests {
             },
         ];
         let updates = update_elo(&mut nodes, &answers, 0);
-        // Winner should gain, loser should lose
         assert_eq!(updates.len(), 2);
         assert!(nodes[0].elo > 1500);
         assert!(nodes[1].elo < 1500);

@@ -1,592 +1,393 @@
-# Samhati — Decentralized Peer-to-Peer LLM Inference Mesh
+# Samhati — Free AI for Everyone, Forever
 
-**Samhati** is a Rust-native, model-agnostic framework for running large language models
-collaboratively across a peer-to-peer mesh network.  Each node contributes GPU/CPU memory and
-compute; together they host models that no single machine could fit alone.  A proximity-aware
-gossip protocol discovers peers, measures real network latency, and dynamically forms the
-optimal cluster for each model request — with mid-token failover if a peer drops.
+**Samhati** is a decentralized AI inference network that makes frontier-level artificial
+intelligence permanently free for every person on earth. Every user is simultaneously a node
+operator — installing Samhati turns any device into both an AI consumer and an inference
+contributor, exactly like BitTorrent where downloading and uploading happen simultaneously.
 
-> **Status:** Active development — networking, shard planning, swarm routing, SSE streaming, and
-> simulated tensor inference are all working.  Full LlamaShard forward-pass validation against
-> real checkpoints is in progress.
+```
+BitTorrent:  download (consume)  +  upload (seed)    →  nobody pays
+Samhati:     query AI (use)      +  serve others (node) →  nobody pays
+             SMTI tokens reward node operators from protocol emission
+```
+
+The core mechanism is **swarm intelligence**: queries fan out to N independent nodes via
+**iroh QUIC**. Each node runs **llama.cpp** inference and attaches a **TOPLOC** cryptographic
+proof. The same N nodes peer-rank each other's answers. **BradleyTerry** aggregation selects the
+winner — achieving **85.90% on GPQA Diamond** vs 68.69% for majority voting.
+
+> Built on **Solana** · Powered by **TOPLOC** · Inspired by **Fortytwo**
 
 ---
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [Feature Status](#feature-status)
-3. [Comparison with Prior Art](#comparison-with-prior-art)
-4. [Crates](#crates)
-5. [Quick Start](#quick-start)
-6. [CLI Reference](#cli-reference)
-7. [Cargo Features](#cargo-features)
-8. [Configuration](#configuration)
-9. [Roadmap](#roadmap)
+1. [How It Works](#how-it-works)
+2. [Core Architecture](#core-architecture)
+3. [Swarm Inference](#swarm-inference)
+4. [TOPLOC — Proof of Honest Inference](#toploc--proof-of-honest-inference)
+5. [Rewards — ELO Not Stake](#rewards--elo-not-stake)
+6. [Self-Evolving Pipeline](#self-evolving-pipeline)
+7. [Solana Integration](#solana-integration)
+8. [Token Economics — SMTI](#token-economics--smti)
+9. [Samhati vs Fortytwo vs Bittensor](#samhati-vs-fortytwo-vs-bittensor)
+10. [Project Structure](#project-structure)
+11. [Quick Start](#quick-start)
+12. [CLI Reference](#cli-reference)
+13. [Apps & SDK](#apps--sdk)
+14. [Roadmap](#roadmap)
+15. [Research Foundation](#research-foundation)
 
 ---
 
-## Architecture
+## How It Works
+
+### The Request Lifecycle
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Samhati Node (mesh-node)                      │
-│                                                                      │
-│  ┌─────────────┐   ┌─────────────────┐   ┌────────────────────────┐ │
-│  │  Gossip /   │   │  SwarmRegistry  │   │  Inference             │ │
-│  │  Discovery  │──▶│  (reputation +  │──▶│  Coordinator           │ │
-│  │  (iroh)     │   │   TTL eviction) │   │  (shard planner)       │ │
-│  └─────────────┘   └─────────────────┘   └────────┬───────────────┘ │
-│                                                    │                 │
-│  ┌─────────────┐   ┌─────────────────┐   ┌────────▼───────────────┐ │
-│  │  Proximity  │   │  Shard Store    │   │  Burn Backend          │ │
-│  │  Router     │   │  (content-addr) │   │  (NdArray / WGPU)      │ │
-│  └─────────────┘   └─────────────────┘   └────────────────────────┘ │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  OpenAI-Compatible REST API  (GET /v1/models, POST /v1/chat) │   │
-│  │  Streaming SSE  ·  Auth  ·  Rate limiting                    │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────┘
-                  ▲                         ▲
-     iroh QUIC    │   gossip/DHT            │   iroh QUIC
-                  │                         │
-           ┌──────┴──────┐           ┌──────┴──────┐
-           │   Peer A    │           │   Peer B    │
-           │  layers 0-15│           │ layers 16-31│
-           └─────────────┘           └─────────────┘
+1. User sends POST /v1/chat/completions to their local samhati-node
+2. Complexity classifier scores the prompt → assigns N (1, 3, 5, 7, or 9 nodes)
+3. ModelRegistry selects top-N nodes by ELO + domain speciality
+4. iroh QUIC opens N parallel connections — fan-out
+5. Phase 1: each node runs llama.cpp independently, attaches TOPLOC proof
+6. Fan-in: N (answer, proof) pairs return. Bad proofs excluded and slashed
+7. Phase 2: all N nodes receive all N answers → C(N,2) pairwise rankings
+8. BradleyTerry aggregates → winner selected → SMTI emitted → Solana settled async
 ```
 
-Inference is **pipeline-parallel**: transformer layers are split across peers.  Each peer runs
-its slice as an iroh QUIC server, passing activation tensors forward as size-prefixed bincode
-frames.  The `SwarmRegistry` tracks EWMA reputation scores for every peer; if a peer drops
-mid-generation the `IrohDistributedExecutor` automatically retries with the next-best candidate.
+```
+              User sends prompt
+                    │
+                    ▼
+       ┌────────────────────────┐
+       │  Complexity Classifier │
+       │  (< 1ms, on-device)   │
+       └───────────┬────────────┘
+                   │  N = 1, 3, 5, 7, or 9
+                   ▼
+       ┌────────────────────────┐
+       │  ModelRegistry         │
+       │  top-N by ELO + domain │
+       └───────────┬────────────┘
+                   │
+   ════════════════╪════════════════ Phase 1: Generate ════
+                   │
+           ┌───────┼───────┬───────────┐
+           ▼       ▼       ▼           ▼
+       ┌──────┐┌──────┐┌──────┐   ┌──────┐
+       │Node 1││Node 2││Node 3│...│Node N│
+       │3B    ││7B    ││14B   │   │3B    │
+       │Hindi ││Code  ││Math  │   │Gen.  │
+       └──┬───┘└──┬───┘└──┬───┘   └──┬───┘
+          │       │       │           │
+          │answer │answer │answer     │answer
+          │+proof │+proof │+proof     │+proof
+          ▼       ▼       ▼           ▼
+       ┌─────────────────────────────────────┐
+       │  TOPLOC Verification                 │
+       │  CPU-only, < 1ms per proof           │
+       │  Invalid → discard + slash on-chain  │
+       └──────────────────┬──────────────────┘
+                          │
+   ═══════════════════════╪════════════ Phase 2: Rank ════
+                          │
+       ┌──────────────────▼──────────────────┐
+       │  All N nodes receive all N answers   │
+       │  Each produces C(N,2) pairwise       │
+       │  rankings + 50-100 token reasoning   │
+       └──────────────────┬──────────────────┘
+                          │
+       ┌──────────────────▼──────────────────┐
+       │  BradleyTerry Aggregation            │
+       │  ELO-weighted MLE → winner           │
+       └──────────┬──────────────┬───────────┘
+                  │              │
+                  ▼              ▼
+       ┌────────────────┐ ┌──────────────────┐
+       │ Winner returned │ │ Solana settlement │
+       │ to user         │ │ (async, off       │
+       │ immediately     │ │  critical path)   │
+       └────────────────┘ └──────────────────┘
+```
+
+The user receives the winning answer **before** Solana settlement completes. Settlement is
+always asynchronous and never on the critical path.
 
 ---
 
-## Feature Status
+## Core Architecture
 
-### Infrastructure
+| Component | Purpose | Implementation |
+|-----------|---------|----------------|
+| **samhati-node** | Main binary — HTTP API, iroh P2P, model runner, wallet | Rust · axum · llama.cpp |
+| **SwarmCoordinator** | Fan-out, collect, verify, rank, aggregate | `crates/samhati-swarm` |
+| **TOPLOC verifier** | Cryptographic proof of honest inference | `crates/samhati-toploc` |
+| **BradleyTerry** | Pairwise ranking aggregation, ELO update | `crates/samhati-ranking` |
+| **ReputationStore** | ELO history, domain speciality, uptime | SQLite → Solana PDAs |
+| **Solana program** | Identity, slash, rewards, settlement | Anchor framework |
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Gossip peer discovery | ✅ Working | iroh-gossip topics, ping/pong RTT probing |
-| Capability announcement | ✅ Working | VRAM, bandwidth, GPU score, layer ranges, uptime |
-| Layer-range advertisement | ✅ Working | `--layer-start/end/total-layers/model-name` flags |
-| Proximity-aware peer scoring | ✅ Working | Weighted: RTT 55%, reliability 20%, bandwidth 15%, GPU 10% |
-| SwarmRegistry (soft-state) | ✅ Working | TTL eviction, EWMA reputation α=0.15 |
-| Dynamic SwarmPlanner | ✅ Working | Per-range peer selection from live registry |
-| Static RoundRobinPlanner | ✅ Working | Even layer distribution across fixed peer list |
-| VRAM / layer estimation | ✅ Working | Any Llama-style config (hidden, layers, kv_heads) |
-| Cluster constraint solver | ✅ Working | VRAM + bandwidth + node-count constraints |
-| State persistence | ✅ Working | JSON peer DB + model registry |
-| Model fallback cascade | ✅ Working | Try smaller model if primary doesn't fit |
+Everything is Rust. Fully peer-to-peer — no Samhati-operated servers on the critical path. The
+Solana program is the only shared state, immutable and public.
 
-### Inference Pipeline
+### Per-Node Services
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Echo executor (debug) | ✅ Working | Annotated pass-through for routing smoke tests |
-| Burn simulate mode | ✅ Working | Arithmetic token simulation, proves pipeline end-to-end |
-| Burn MLP mode | ✅ Working | Random-weight matmul + tanh, real NdArray tensor ops |
-| Burn weights/forward/embed | ✅ Working | Load real safetensors, compute against loaded weights |
-| Autoregressive `generate()` | ✅ Working | Byte tokenizer, prefill + decode loop, EOS detection |
-| Tensor frame wire format | ✅ Working | LE f32 bytes + shape + seq_offset, bincode serialized |
-| iroh QUIC RPC | ✅ Working | Size-prefixed bincode over QUIC streams |
-| Mid-token failover | ✅ Working | Reputation hit → next-best peer → retry up to N times |
-| `--executor swarm` | ✅ Working | Gossip discovery → SwarmPlanner → distributed pipeline |
-| KV cache (per-session) | ✅ Working | LayerKv chunks, TTL eviction, thread-safe |
-| LlamaShard weight loading | ✅ Working | safetensors → Burn Linear/RmsNorm via Record API |
-| LlamaShard full forward pass | ⚠️ Partial | Attention/MLP/RoPE compile; numerical correctness vs HF not yet validated |
-| WGPU GPU backend | ⚠️ Partial | Compiles; `LlamaShard::load_wgpu()` available; benchmarked |
+Every Samhati node runs three iroh endpoints simultaneously:
 
-### API Layer
+| Endpoint | Purpose |
+|----------|---------|
+| **Inference** | Receives request → runs llama.cpp → returns answer + TOPLOC proof |
+| **Ranking** | Receives N answers → returns pairwise preference scores with reasoning |
+| **DERP relay** | Contributes NAT traversal connectivity, earns small SMTI bonus |
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| `GET /health` | ✅ Working | |
-| `GET /v1/models` | ✅ Working | Lists allow-listed models |
-| `POST /v1/chat/completions` (non-stream) | ✅ Working | HTTP proxy or local-exec backend |
-| `POST /v1/chat/completions` (`stream: true`) | ✅ Working | SSE chunks in OpenAI format; true proxy for HTTP backend, word-stream for local-exec |
-| Bearer token + x-api-key auth | ✅ Working | |
-| Token-bucket rate limiting | ✅ Working | Configurable RPS + burst |
-| API → distributed pipeline | ❌ Not wired | `/v1/chat/completions` calls http/local-exec only; iroh/swarm executor path pending |
+DERP relay means nodes earn SMTI even when hardware is too slow to win inference — every device
+contributes something.
 
-### Weight Management
+### Actual Inference Stack
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Shard store (content-addressed) | ✅ Working | blake3 hash, add/get/find/evict/list |
-| Shard store used in inference | ❌ Disconnected | Library complete; inference pipeline fetches weights directly from disk paths |
-| iroh-blobs P2P weight transfer | 📋 Planned | |
+```
+samhati-node (Rust orchestrator)
+  ├── iroh QUIC (peer discovery + RPC)
+  ├── SwarmCoordinator (fan-out → verify → rank → aggregate)
+  │     ├── Each peer: llama-server subprocess (llama.cpp)
+  │     ├── TOPLOC proof verification (CPU-only)
+  │     └── BradleyTerry winner selection
+  └── Solana settlement (async, off critical path)
+```
+
+Inference runs through **llama.cpp** (via `llama-server` or `llama-cli` subprocess). The Rust
+layer handles orchestration, networking, ranking, and settlement — not GPU compute.
 
 ---
 
-## Comparison with Prior Art
+## Swarm Inference
 
-| Dimension | Samhati | Reference systems |
-|-----------|---------|-------------------|
-| **Implementation language** | Rust | Python |
-| **P2P transport** | iroh (QUIC, hole-punching) | libp2p / gRPC |
-| **Inference backend** | Burn 0.20 (NdArray + WGPU) | PyTorch / CUDA |
-| **Peer discovery** | iroh-gossip DHT + ping/pong RTT | DHT |
-| **Cluster selection** | RTT + VRAM + reliability scoring | VRAM-only |
-| **Reputation system** | EWMA per-peer, updated on every RPC | Partial |
-| **Mid-token failover** | ✅ Automatic retry with next-best peer | ❌ |
-| **Streaming (SSE)** | ✅ True proxy or simulated word-stream | ✅ OpenAI-compatible |
-| **HTTP API auth + rate limiting** | ✅ Built-in | ❌ External |
-| **Multi-model registry** | ✅ JSON registry + gossip broadcast | ❌ Single model per network |
-| **KV cache** | ✅ Per-session, TTL eviction | ✅ Per-session |
-| **Quantization** | 📋 4/5/8-bit planned | ✅ 8-bit (bitsandbytes) |
-| **Tensor parallelism** | 📋 Planned | ❌ |
-| **MoE expert placement** | 📋 Planned | ❌ |
-| **Speculative decoding** | 📋 Planned | ❌ |
-| **Memory estimation** | ✅ Weights + KV + runtime overhead | Partial |
-| **Production hardening** | 🚧 In progress | ✅ Battle-tested |
-| **Latency target** | ≤ 2 s first token (regional) | ~5–10 s observed |
+Implements [Fortytwo: Swarm Inference with Peer-Ranked Consensus](https://arxiv.org/abs/2510.24801).
+
+### Why Swarm Beats Single Model
+
+**85.90% on GPQA Diamond** vs **68.69%** for majority voting (+17.21pp):
+
+- **Diversity cancels errors.** Five different models have different blind spots.
+- **Peer ranking adds reasoning.** 50-100 token reasoning chains per comparison — these become
+  training data for the self-evolving pipeline.
+- [arXiv:2602.03794](https://arxiv.org/abs/2602.03794) proves **2 diverse agents ≥ 16 homogeneous**.
+
+### Complexity Routing
+
+| Query type | N nodes | Example | Latency |
+|------------|---------|---------|---------|
+| Trivial | 1 (local) | "What is 2+2?" | < 1s |
+| Conversational | 3 | "Explain photosynthesis" | 3-8s |
+| Reasoning | 5 | "Debug this Rust code" | 5-15s |
+| Hard | 7 | "Solve this AIME problem" | 10-30s |
+| Expert | 9 | "GPQA Diamond level" | 15-45s |
+
+Users can override: **Quick** (N=3) vs **Best** (N=7).
+
+### Peer Ranking
+
+In Phase 2, the same N nodes that generated answers receive all N answers and produce pairwise
+rankings. For N=5: C(5,2) = 10 comparisons, each with:
+
+- **Preference score:** P(A beats B) ∈ [0, 1]
+- **Reasoning chain:** 50-100 tokens explaining the preference
+- **Domain tags:** auto-extracted topic classification
+
+Reasoning chains are **not discarded** — they become training data.
+
+### BradleyTerry Aggregation
+
+```
+P(i beats j) = exp(β_i) / (exp(β_i) + exp(β_j))
+
+Winner = argmax(β_i)
+ELO Δ  = K × (actual - expected),  K = 32 new / 16 established
+```
+
+High-ELO nodes' rankings carry more weight — self-reinforcing quality signal.
 
 ---
 
-## Crates
+## TOPLOC — Proof of Honest Inference
 
-| Crate | Description |
-|-------|-------------|
-| `mesh-node` | Main binary — CLI, gossip node, API server, distributed inference driver |
-| `inference-coordinator` | Shard planner, coordinator, Burn LLM execution, KV cache, RPC wire format, SwarmPlanner |
-| `proximity-router` | Peer scoring (RTT/bandwidth/reliability/GPU) + SwarmRegistry with EWMA reputation |
-| `cluster-manager` | Constraint solver: given peers and model, pick smallest feasible cluster |
-| `model-config` | Parse any safetensors config.json; estimate VRAM (weights + KV + runtime) |
-| `shard-store` | Content-addressed on-disk cache for weight shards (blake3 hashes) |
+[TOPLOC](https://arxiv.org/abs/2501.16007) (PrimeIntellect) cryptographically proves a node ran
+real inference — without requiring any GPU on the verifier side.
 
----
+| Metric | Value |
+|--------|-------|
+| Proof size | 258 bytes per 32 tokens |
+| Detection rate | 100% |
+| False positive rate | 0% |
+| Verifier GPU | None (CPU-only) |
+| Verification time | < 1ms |
 
-## Quick Start
+A node claiming 70B but running 1B produces a proof that fails — 100% detection, 0 false positives.
 
-### Prerequisites
+### Sybil Resistance
 
-- Rust 1.82+ (`rustup update stable`)
-- For GPU support: a WGPU-compatible GPU (Vulkan / Metal / DX12)
+| Layer | Mechanism | Attacker cost | Honest user cost |
+|-------|-----------|---------------|------------------|
+| 1 | TOPLOC calibration (10 test prompts) | Real GPU × N fake nodes | 2 min electricity |
+| 2 | ELO quality gates | Hundreds of honest rounds | Zero |
+| 3 | iroh NodeID fingerprinting | Unique hardware per node | Zero |
 
-```bash
-git clone https://github.com/mrunalpendem123/Samhati.git
-cd Samhati
-cargo build                    # CPU / simulation only
-cargo build --features burn    # + Burn NdArray + WGPU GPU backend
-```
-
-### Run a Two-Node Gossip Mesh
-
-Terminal 1 — first node:
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic 1717171717171717171717171717171717171717171717171717171717171717
-```
-
-It prints a `node_id`. Copy it. Terminal 2 — second node:
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic 1717171717171717171717171717171717171717171717171717171717171717 \
-  --bootstrap <node_id_from_terminal_1>
-```
-
-Both nodes exchange heartbeats and capability announcements. Add `--rtt-probe` on both to
-measure actual network latency.
-
-### Open-Mesh Swarm: Two Inference Nodes + Coordinator
-
-**Node A** — hosts layers 0–16 of `llama` model:
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic <64-hex> \
-  --layer-start 0 --layer-end 16 --total-layers 32 --model-name llama \
-  --free-vram 24
-```
-
-**Node B** — hosts layers 16–32:
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic <64-hex> \
-  --bootstrap <node_a_id> \
-  --layer-start 16 --layer-end 32 --total-layers 32 --model-name llama \
-  --free-vram 24
-```
-
-**Coordinator** — discovers both nodes and runs the full model:
-```bash
-cargo run -p mesh-node -- dist-run \
-  --executor swarm \
-  --topic <64-hex> \
-  --bootstrap <node_a_id> \
-  --discover-secs 5 \
-  --models models.json --model llama \
-  --layers-per-shard 16 \
-  --input "Hello, world"
-```
-
-### Run Simulated Distributed Inference
-
-```bash
-# Echo executor (no tensor ops — routing smoke-test)
-cargo run -p mesh-node -- dist-run \
-  --peers peer-a,peer-b \
-  --config sample-config.json --params-b 7 \
-  --input "Hello, world"
-
-# Burn simulate mode (proves the full shard pipeline)
-cargo run -p mesh-node --features burn -- dist-run \
-  --peers peer-a,peer-b \
-  --config sample-config.json --params-b 7 \
-  --executor burn --model-mode simulate \
-  --input "Hello, world"
-
-# Burn MLP mode (real NdArray tensor ops: matmul + tanh)
-cargo run -p mesh-node --features burn -- dist-run \
-  --peers peer-a,peer-b \
-  --config sample-config.json --params-b 7 \
-  --executor burn --model-mode mlp --model-hidden 64 \
-  --input "Hello, world"
-```
-
-### Start the API Server
-
-```bash
-# Proxy to any OpenAI-compatible upstream with SSE streaming
-cargo run -p mesh-node -- api \
-  --bind 127.0.0.1:8000 \
-  --infer-base http://127.0.0.1:8001/v1 \
-  --default-model llama-3-8b \
-  --api-auth my-secret-key \
-  --rate-limit-rps 10
-
-# Test streaming
-curl -N http://127.0.0.1:8000/v1/chat/completions \
-  -H "Authorization: Bearer my-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"llama-3-8b","messages":[{"role":"user","content":"Hello"}],"stream":true}'
-```
+No financial stake required from honest users. Physical computation **is** the stake.
 
 ---
 
-## CLI Reference
+## Rewards — ELO Not Stake
+
+A [2025 Bittensor analysis](https://arxiv.org/abs/2507.02951) found rewards "overwhelmingly
+driven by stake." Samhati eliminates this — rewards are proportional to **demonstrated quality**.
 
 ```
-mesh-node <COMMAND> [OPTIONS]
+winner_share      = base_emission × 0.60
+participant_share = base_emission × 0.40
+each participant  = participant_share × (elo_i / sum(elo_all))
+domain bonus      = × 1.5 if specialist model matches query domain
 ```
 
-### `gossip` — Run a gossip mesh node
+### Domain-Weighted Emissions
 
-Announces capabilities, discovers peers, measures RTT, performs cluster selection.
+| Scenario | Multiplier | Effect |
+|----------|------------|--------|
+| Generic node, Hindi query | 1.0x | Standard |
+| Hindi SLM, Hindi query | 1.5x | 50% bonus |
+| Oversaturated domain | 1.5x shared many ways | Equilibrium |
+| Undersaturated domain | 1.5x, few competitors | Strong signal to specialize |
 
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic <64-hex>                           # shared topic ID (required)
-  [--bootstrap <endpoint_id> ...]            # seed peers
-  [--config <path>] [--params-b <f64>]       # model to serve
-  [--models <models.json>]                   # multi-model registry
-  [--model-name <name>]                      # active model name
-  [--fallback-model name:path:params_b]      # fallback chain
-  # Layer-range advertisement (for --executor swarm):
-  [--layer-start <n>] [--layer-end <n>]      # layer range this node serves
-  [--total-layers <n>]                       # full model depth
-  # Hardware capabilities:
-  [--free-vram <GB>]                         # override VRAM auto-detect
-  [--reserve-gb 4] [--safety-factor 0.7]
-  [--bandwidth 800] [--reliability 0.95] [--gpu-score 0.8]
-  [--rtt-ms 20] [--kv-bits 8] [--context 8192] [--quant 4]
-  # Cluster constraints:
-  [--min-nodes 2] [--max-nodes 8] [--min-bw 500]
-  # Peer health:
-  [--rtt-probe] [--rtt-timeout-ms 3000]
-  [--peer-ttl-ms 15000] [--peer-fail-threshold 3]
-  [--peer-cooldown-ms 30000] [--cluster-stickiness-ms 15000]
-  [--load-penalty 0.05] [--load-decay 0.9]
-  [--state-dir ./state]
-  [--role inference|routing|cache]
-  [--interval <secs>]
+Operators see earnings in their dashboard and rationally switch to specialist models.
+
+### ELO Mechanics
+
+- New nodes: K=32 · Established (>1000 rounds): K=16 · Floor: 100
+- TOPLOC slash: **-200 ELO + 10% stake burn**
+- Two slashes → below routing threshold · Three → effectively fatal
+- Asymmetry (slow to earn, fast to lose) makes honesty dominant
+
+---
+
+## Self-Evolving Pipeline
+
+Every round with BradleyTerry confidence ≥ 0.70 emits a training example:
+
+```
+More users → more queries → more training data
+  ↓
+Better specialist SLMs (monthly QLoRA fine-tune)
+  ↓
+Higher accuracy → higher peer-rank scores → higher ELO
+  ↓
+More SMTI rewards → more operators run specialists
+  ↓
+Better answers → more users → [repeat]
 ```
 
-### `serve` — Start an iroh QUIC inference server
+| Parameter | Value |
+|-----------|-------|
+| Base model | Qwen2.5-3B or Llama-3.2-3B |
+| Method | QLoRA (r=64, α=128) |
+| Hardware | Single RTX 3090 |
+| Time | 2-6h (10K examples) / 6-12h (100K) |
+| Cost | ~$20-50 on RunPod |
+| Output | GGUF Q4_K_M for llama.cpp |
+| Release | HuggingFace, Apache 2.0 |
+| Cadence | Monthly per domain |
 
-Binds an iroh endpoint, optionally loads a real LlamaShard, and serves inference RPCs from
-other nodes.  Announces its NodeId on startup — pass that to `dist-run --peers`.
+Implemented in `pipeline/`: collector → trainer (SFT + DPO) → exporter (GGUF) → scheduler.
 
-```bash
-cargo run -p mesh-node --features burn -- serve \
-  --model-path /path/to/model.safetensors \
-  --layer-start 0 --layer-end 16 --total-layers 32 \
-  --hidden 4096 --intermediate 11008 --vocab 32000 \
-  --heads 32 --kv-heads 8 --rope-theta 500000 \
-  [--kv-ttl-secs 300]
-```
+---
 
-Without `--model-path` the node runs a `MockInferenceServer` (echo with metadata).
+## Solana Integration
 
-### `dist-run` — Execute a distributed inference pass
+Every identity, proof, ranking, reward, and slash is on-chain — permanent and publicly
+verifiable.
 
-```bash
-cargo run -p mesh-node [--features burn] -- dist-run \
-  --peers peer-a,peer-b \
-  [--models <path> --model <name>] \
-  [--config <path> --params-b <f64>] \
-  [--input "prompt text"] \
-  [--max-tokens 64] [--temperature 0.7] \
-  [--executor echo|burn|iroh|swarm] \
-  [--max-retries 2]
-```
+| Property | Solana | Ethereum | Monad (Fortytwo) |
+|----------|--------|----------|-------------------|
+| Tx cost | $0.00025 | $5-50 | Pre-mainnet |
+| Block time | 400ms | 12s | Pre-mainnet |
+| DePIN projects | 250+ | Few | None |
+| Rust SDK | Native (Anchor) | Solidity | EVM |
 
-**Executor modes:**
+Per-round settlement: ~$0.00065 (7 ELO updates + 1 proof hash).
 
-| `--executor` | Description |
-|---|---|
-| `echo` | No-op: returns the input annotated with shard info |
-| `burn` | Local Burn NdArray simulation (requires `--features burn`) |
-| `iroh` | Real distributed pass over iroh QUIC to `--peers` |
-| `swarm` | Discovers peers via gossip, uses SwarmPlanner for dynamic routing |
+### Anchor Program — 5 Instructions
 
-**`burn` executor — `--model-mode` options:**
+Deployed in `programs/samhati-protocol/`:
 
-| Mode | What it does |
-|---|---|
-| `simulate` | Adds layer index to a scalar — proves pipeline end-to-end |
-| `mlp` | Random-weight MLP: matmul + tanh over input bytes |
-| `weights` | Loads a named tensor from safetensors, reports shape + checksum |
-| `forward` | Matrix-vector multiply with a loaded weight tensor |
-| `embed` | Embedding lookup: maps input bytes to token IDs, sums rows |
+| Instruction | Effect |
+|-------------|--------|
+| `register_node` | Create NodeAccount PDA. ELO=1500, calibrated=false |
+| `calibrate_node` | Set calibrated=true after TOPLOC calibration round |
+| `submit_round` | Store proof hashes, rankings, ELO deltas, winner, SMTI emitted |
+| `slash_node` | ELO -= 200, burn 10% stake |
+| `emit_rewards` | Permissionless — transfer SMTI from vault to operator wallet |
 
-**`iroh` executor extra flags:**
+### On-Chain Data
 
-```bash
---max-retries 2          # failover attempts on peer error
-```
+```rust
+// NodeAccount PDA — seeds=[b"node", pubkey]
+elo_score:       i32,     // [100, ∞), starts 1500
+calibrated:      bool,    // must pass TOPLOC calibration
+model_name:      String,  // "samhati-rust-coder-14b-v2"
+domain_tags:     u64,     // bitmask
+total_rounds:    u64,
+rounds_won:      u64,
+slash_count:     u8,
+staked:          u64,
+pending_rewards: u64,
 
-**`swarm` executor extra flags:**
-
-```bash
---topic <64-hex>         # gossip topic to join
---bootstrap <id>         # at least one known peer
---discover-secs 5        # how long to collect announcements before planning
---layers-per-shard 16    # target layers per shard slice
---max-retries 2          # failover attempts on peer error
-```
-
-### `dist-plan` — Print a layer shard plan
-
-```bash
-cargo run -p mesh-node -- dist-plan \
-  --peers peer-a,peer-b,peer-c \
-  [--models <path> --model <name>] \
-  [--config <path> --params-b <f64>] \
-  [--min-layers-per-peer 1]
-```
-
-### `estimate` — Estimate VRAM requirements
-
-```bash
-cargo run -p mesh-node -- estimate \
-  --config <path> --params-b <f64> \
-  [--quant 4] [--seq 8192] [--batch 1] [--nodes 4] \
-  [--kv-bytes 1] [--overhead 1.15] [--runtime-overhead 0.15]
-```
-
-### `capacity` — Find minimum nodes needed
-
-```bash
-cargo run -p mesh-node -- capacity \
-  --free-vram <GB> \
-  [--models <path> --model <name>] \
-  [--config <path> --params-b <f64>] \
-  [--max-nodes 8] [--seq 4096] [--quant 4] [--kv-bytes 1]
-```
-
-### `api` — Start the OpenAI-compatible REST API server
-
-```bash
-cargo run -p mesh-node -- api \
-  --bind 127.0.0.1:8000 \
-  [--infer-base http://upstream/v1]   # proxy backend
-  [--infer-key sk-...]
-  [--default-model <name>]
-  [--local-bin /path/to/llama-cli \   # local-exec backend
-   --local-args "-m {model} -p {prompt} -n {max_tokens} --temp {temperature}" \
-   --local-model /path/to/model.gguf]
-  [--api-auth <secret-key>]
-  [--allow-model <name>]              # whitelist (repeatable)
-  [--rate-limit-rps 5] [--rate-limit-burst 10]
-```
-
-**Endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Node health check |
-| `GET` | `/v1/models` | List allow-listed models |
-| `POST` | `/v1/chat/completions` | Chat inference — supports `"stream": true` (SSE) |
-
-**SSE streaming** — when `"stream": true`:
-- **HTTP proxy backend**: content deltas are forwarded token-by-token from upstream as they arrive
-- **Local-exec backend**: full response is simulated word-by-word as SSE chunks
-
-### `simulate` — Cluster selection simulation
-
-```bash
-cargo run -p mesh-node -- simulate \
-  --config <path> --params-b <f64> \
-  [--peers peers.json] [--rtt-samples rtt.json] \
-  [--min-nodes 2] [--max-nodes 6] [--min-bw 500]
-```
-
-### `infer-http` — Query an OpenAI-compatible endpoint directly
-
-```bash
-cargo run -p mesh-node -- infer-http \
-  --api-base http://127.0.0.1:8000/v1 \
-  --model <name> --prompt "Your prompt" \
-  [--system "System message"] \
-  [--max-tokens 128] [--temperature 0.7] [--api-key sk-...]
-```
-
-### `infer-local` — Run a local inference binary
-
-Template variables: `{model}`, `{prompt}`, `{max_tokens}`, `{temperature}`, `{context}`.
-
-```bash
-cargo run -p mesh-node -- infer-local \
-  --local-bin /path/to/llama-cli \
-  --local-args "-m {model} -p {prompt} -n {max_tokens} --temp {temperature} --ctx-size {context}" \
-  --local-model /path/to/model.gguf \
-  --prompt "Hello"
+// RoundAccount PDA — seeds=[b"round", round_id]
+participant_nodes: Vec<Pubkey>,
+proof_hashes:      Vec<[u8; 32]>,
+peer_rankings:     Vec<PairScore>,
+elo_deltas:        Vec<i32>,
+winner:            Pubkey,
+smti_emitted:      u64,
+settled:           bool,
 ```
 
 ---
 
-## Cargo Features
+## Token Economics — SMTI
 
-| Feature | Description |
-|---------|-------------|
-| *(none)* | Base build: networking, planning, echo executor, API server, SSE streaming |
-| `burn` | Enables Burn 0.20 (NdArray + WGPU), `LlamaShard`, `KvCacheStore`, real tensor ops |
+Solana SPL token. Fixed supply: **1,000,000,000** (1B).
 
-```bash
-cargo build                    # no ML deps
-cargo build --features burn    # full Burn stack
-cargo test                     # run all unit tests (11 tests)
-cargo test --features burn     # run tests with Burn backend
+| Allocation | % | Amount | Purpose |
+|------------|---|--------|---------|
+| Node emission | 60% | 600M | Protocol rewards for inference |
+| Ecosystem | 20% | 200M | Grants, partnerships, dev incentives |
+| Team | 15% | 150M | 4-year vest, 1-year cliff |
+| Liquidity | 5% | 50M | Raydium/Jupiter DEX liquidity |
+
+**Emission:** ~164,000 SMTI/day initially, halving every ~2.5 years over 10 years.
+
+### Domain Pool AMM
+
+Each domain (Hindi, Rust, Math, DeFi, General) has a Solana liquidity pool. Emissions
+proportional to net SMTI staked — self-regulating market for compute allocation:
+
+```
+Hindi undersupplied → users stake into Hindi pool
+→ Hindi emission ↑ → Hindi nodes earn more
+→ more operators run Hindi SLM → supply ↑ → equilibrium
 ```
 
 ---
 
-## Configuration
+## Samhati vs Fortytwo vs Bittensor
 
-### Model config (`config.json`)
-
-Standard HuggingFace `config.json` format — any Llama-style architecture:
-
-```json
-{
-  "model_type": "llama",
-  "num_hidden_layers": 32,
-  "num_attention_heads": 32,
-  "num_key_value_heads": 8,
-  "hidden_size": 4096,
-  "intermediate_size": 11008,
-  "vocab_size": 32000,
-  "rope_theta": 500000.0,
-  "rms_norm_eps": 1e-5
-}
-```
-
-Pass it with `--config config.json --params-b 7` (7 = billions of parameters).
-
-### Multi-model registry (`models.json`)
-
-```json
-[
-  {
-    "name": "llama-3-8b",
-    "config_path": "configs/llama-3-8b.json",
-    "params_b": 8.0,
-    "quant_bits": 4,
-    "kv_bits": 8,
-    "max_context": 8192
-  },
-  {
-    "name": "mistral-7b",
-    "config_path": "configs/mistral-7b.json",
-    "params_b": 7.0,
-    "quant_bits": 4
-  }
-]
-```
-
-Use with `--models models.json --model llama-3-8b`.
-
-### Gossip node with layer advertisement
-
-```bash
-cargo run -p mesh-node -- gossip \
-  --topic <64-hex> \
-  --models models.json \
-  --model-name llama-3-8b \
-  --layer-start 0 --layer-end 16 --total-layers 32 \
-  --free-vram 24 \
-  --min-nodes 2 --max-nodes 8 \
-  --rtt-probe \
-  --state-dir ./state
-```
-
----
-
-## Roadmap
-
-### Phase 1 — Foundation ✅
-
-- [x] iroh QUIC transport + gossip peer discovery
-- [x] Capability announcement (VRAM, RTT, bandwidth, GPU score)
-- [x] Proximity-aware cluster selection
-- [x] VRAM estimation for any model config
-- [x] Round-robin shard planner
-- [x] Content-addressed shard store (blake3)
-- [x] OpenAI-compatible HTTP API with auth and rate limiting
-- [x] State persistence
-- [x] Burn 0.20 integration (NdArray + WGPU, model-agnostic)
-
-### Phase 2 — Open-Mesh Swarm ✅
-
-- [x] SwarmRegistry: soft-state peer store with TTL eviction + EWMA reputation
-- [x] Dynamic SwarmPlanner: per-range peer selection from live registry
-- [x] Layer-range advertisement in gossip (`--layer-start/end/total-layers/model-name`)
-- [x] `--executor swarm` with full gossip discovery → plan → execute flow
-- [x] Mid-token failover: reputation hit → retry with next-best peer
-- [x] `serve` command: iroh QUIC server with optional LlamaShard weight loading
-- [x] Autoregressive `generate()` pipeline (prefill + decode loop)
-- [x] SSE streaming (`stream: true`) — true proxy for HTTP backend, simulated for local-exec
-
-### Phase 3 — LlamaShard Validation 🚧
-
-- [ ] End-to-end numerical correctness vs HuggingFace on Llama-3 / Mistral
-- [ ] GQA `repeat_kv` in attention forward pass
-- [ ] RoPE rotate-half integration test
-- [ ] KV cache handoff across shard boundaries over the wire
-- [ ] API → distributed tensor pipeline (`/v1/chat/completions` via iroh/swarm executor)
-- [ ] ShardStore integration into inference pipeline (P2P weight fetch via blake3 hash)
-
-### Phase 4 — Performance & Scale 📋
-
-- [ ] 4/5/8-bit quantized weight loading (GGUF + safetensors)
-- [ ] Tensor parallelism (column/row parallel linear layers)
-- [ ] Speculative decoding across shards
-- [ ] MoE expert placement (Mixtral, DeepSeek)
-- [ ] iroh-blobs weight distribution (P2P checkpoint transfer)
-- [ ] Adaptive context reduction under memory pressure
-- [ ] Continuous batching
-
-### Phase 5 — Production 📋
-
-- [ ] Reputation persistence across restarts
-- [ ] Encrypted inference (homomorphic / TEE investigation)
-- [ ] Web dashboard (peer topology, cluster health, reputation heatmap)
-- [ ] Docker / container deployment
-- [ ] Incentive layer (optional token-gated access)
+| Property | Samhati | Fortytwo | Bittensor |
+|----------|---------|----------|-----------|
+| Chain | **Solana** (live) | Monad (pre-mainnet) | Substrate |
+| Reward signal | **ELO** (quality) | Reputation (opaque) | Stake (capital) |
+| Proof of compute | **TOPLOC** (crypto) | Capability tests | None |
+| P2P transport | **iroh QUIC** (open) | Undisclosed | Custom |
+| Inference | Swarm + BradleyTerry | Swarm + BradleyTerry | Subnet competition |
+| Self-evolving | Domain SLMs | Strand Rust Coder | SN9 |
+| User cost | **Free** | API pricing | Subnet fees |
+| Sybil resistance | TOPLOC proof | Stake + calibration | Stake |
 
 ---
 
@@ -595,49 +396,177 @@ cargo run -p mesh-node -- gossip \
 ```
 Samhati/
 ├── crates/
-│   ├── mesh-node/                  # Main binary (CLI + server)
+│   ├── samhati-swarm/              # Swarm consensus engine
 │   │   └── src/
-│   │       ├── main.rs             # All CLI commands
-│   │       ├── server.rs           # iroh QUIC inference server (real + mock)
-│   │       ├── protocol.rs         # Gossip message types + CapabilityPayload
-│   │       ├── api.rs              # OpenAI REST API (SSE streaming, auth, rate limit)
-│   │       ├── inference.rs        # HTTP proxy + local-exec backends + SSE stream helpers
-│   │       ├── scheduler.rs        # Cluster candidate scoring
-│   │       ├── state.rs            # Peer / session state
-│   │       └── persist.rs          # JSON state persistence
-│   ├── inference-coordinator/      # Shard planning + tensor execution
+│   │       ├── coordinator.rs      # SwarmCoordinator: fan-out → verify → rank → aggregate
+│   │       ├── classifier.rs       # ComplexityClassifier: prompt → N nodes (1-9)
+│   │       ├── registry.rs         # ModelRegistry: ELO-ranked node selection
+│   │       └── types.rs            # InferenceRequest, NodeResponse, SwarmResult
+│   ├── samhati-ranking/            # ELO + BradleyTerry
 │   │   └── src/
-│   │       ├── coordinator.rs      # Orchestrates multi-shard pass; generate() loop
-│   │       ├── model_runner.rs     # ModelShardRunner (5 Burn simulation modes)
-│   │       ├── llm_shard.rs        # LlamaShard<B> (real weight loading + forward)
-│   │       ├── kv_cache.rs         # KvCacheStore<B> (per-session KV, TTL eviction)
-│   │       ├── tensor_frame.rs     # Wire format for activation tensors
-│   │       ├── iroh_executor.rs    # QUIC-based executor with mid-token failover
-│   │       ├── swarm_planner.rs    # SwarmPlanner (dynamic peer selection)
-│   │       ├── plan.rs             # RoundRobinPlanner + ShardPlan
-│   │       └── rpc.rs              # RPC request/response types
-│   ├── proximity-router/           # Peer scoring and ranking
+│   │       ├── elo.rs              # EloRating, adaptive K-factor, per-domain
+│   │       ├── bradley_terry.rs    # MLE aggregation from pairwise outcomes
+│   │       └── rewards.rs          # SMTI emission calculator, domain bonuses
+│   ├── samhati-toploc/             # Proof of honest inference
 │   │   └── src/
-│   │       ├── lib.rs              # ProximityRouter, scoring weights, rank_peers()
-│   │       └── swarm.rs            # SwarmRegistry, SwarmPeer, LayerRange, reputation
-│   ├── cluster-manager/            # VRAM-aware cluster constraint solver
+│   │       ├── prover.rs           # BLAKE3 logit hashes + Ed25519 signing
+│   │       ├── verifier.rs         # CPU-only proof validation
+│   │       └── calibration.rs      # 10-prompt new-node verification
+│   ├── samhati-tui/                # Terminal UI (ratatui)
+│   │   └── src/
+│   │       ├── app.rs              # 5-tab app: Chat, Dashboard, Models, Wallet, Settings
+│   │       ├── node_runner.rs      # Spawns llama-server subprocess
+│   │       └── swarm.rs            # Multi-node swarm orchestration
+│   ├── mesh-node/                  # Network node binary
+│   │   └── src/
+│   │       ├── main.rs             # CLI: gossip, serve, dist-run, api, etc.
+│   │       ├── api.rs              # OpenAI-compatible REST API (axum)
+│   │       ├── swarm_bridge.rs     # Wires SwarmCoordinator to iroh transport
+│   │       ├── inference.rs        # HTTP proxy + llama.cpp subprocess backends
+│   │       ├── server.rs           # iroh QUIC inference endpoint
+│   │       └── protocol.rs         # Gossip message types
+│   ├── inference-coordinator/      # Distributed execution planner
+│   ├── proximity-router/           # Peer scoring + SwarmRegistry
+│   ├── cluster-manager/            # VRAM-aware constraint solver
 │   ├── model-config/               # Config parsing + VRAM estimation
-│   └── shard-store/                # Content-addressed weight shard cache
-├── sample-config.json              # Example model config
-└── sample-peers.json               # Example peer list
+│   └── shard-store/                # Content-addressed weight cache (blake3)
+├── programs/
+│   └── samhati-protocol/           # Solana Anchor program (5 instructions)
+├── app-frontend/                   # React/Vite web UI
+├── app-tauri/                      # Tauri desktop app
+├── sdk/rust/                       # OpenAI-compatible Rust SDK
+├── pipeline/                       # Self-evolving training pipeline (Python)
+│   ├── collector.py                # Swarm round → training examples
+│   ├── trainer.py                  # QLoRA SFT + DPO
+│   ├── exporter.py                 # LoRA merge → GGUF export
+│   └── scheduler.py                # Monthly per-domain trigger
+└── scripts/                        # Deployment utilities
 ```
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.82+ (`rustup update stable`)
+- llama.cpp (`brew install llama.cpp` on macOS)
+
+```bash
+git clone https://github.com/mrunalpendem123/Samhati.git
+cd Samhati
+cargo build
+```
+
+### Run
+
+```bash
+cargo run -p samhati-tui
+```
+
+That's it. The TUI handles everything:
+
+1. **Models tab** → pick a model → press **Enter** → downloads GGUF from HuggingFace
+2. Once downloaded, `llama-server` starts automatically on port 8000
+3. **Chat tab** → type a message → get AI response (single node)
+4. **Swarm mode** → go back to Models → press **s** on another model → starts a second
+   `llama-server` on port 8001 and adds it to the swarm
+5. Now chat goes through **BradleyTerry ranking** — you see winner, confidence %, node count
+
+### Keyboard
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `1-5` | Switch tabs |
+| `Enter` | Send message (Chat) / Install + activate model (Models) |
+| `s` | Add model as swarm node (Models) |
+| `a` | Request SOL airdrop (Wallet) |
+| `q` | Quit |
+
+### Tabs
+
+- **Chat** — AI chat, routes through swarm when multiple nodes are running
+- **Dashboard** — ELO score, SMTI balance, inferences served, peers, last swarm round
+- **Models** — 24+ models (Qwen, Llama, Phi, domain specialists), download with progress
+- **Wallet** — Solana wallet (devnet): balance, transactions, airdrop
+- **Settings** — API endpoint, VRAM, device detection
+
+---
+
+## Roadmap
+
+### Phase 1 — Core Swarm (Weeks 1-4)
+
+- [x] samhati-node: axum HTTP + iroh QUIC + llama.cpp backend
+- [x] SwarmCoordinator: fan-out, fan-in, TOPLOC verify, peer rank, aggregate
+- [x] BradleyTerry: pairwise aggregation, ELO update
+- [ ] ReputationStore: SQLite-backed ELO persistence
+- [ ] 3-node testnet with measurable quality improvement
+
+### Phase 2 — App and Incentives (Weeks 5-8)
+
+- [x] Tauri desktop app: chat UI, model runner, SMTI wallet
+- [x] Solana Anchor program: register, calibrate, submit_round, slash, emit
+- [x] TOPLOC calibration round as Sybil gate
+- [ ] SMTI emission to node operators
+- [ ] Public dashboard: live node count, inferences/24h
+
+### Phase 3 — Speed and Quality (Weeks 9-12)
+
+- [ ] EAGLE-3 speculative decoding via SGLang (3-6.5x speedup)
+- [ ] Cascade classifier: trivial queries answered locally
+- [ ] Domain routing: specialist model preference
+- [ ] Devnet → Mainnet Solana migration
+- [ ] iroh DERP relay nodes
+
+### Phase 4 — First Domain SLM (Month 4-6)
+
+- [x] Swarm data collection pipeline (Python)
+- [ ] First domain SLM: QLoRA on Qwen2.5-3B from swarm data
+- [ ] HuggingFace open-source release
+- [ ] Domain bonus emission
+- [ ] React Native mobile app
+
+### Phase 5 — Full Ecosystem (Month 7+)
+
+- [ ] Domain AMM pools on Solana
+- [ ] Multi-coordinator geographic sharding
+- [ ] SMTI on Raydium/Jupiter
+- [ ] Developer API with SLA tiers
+- [ ] Continuous monthly SLM pipeline
+
+---
+
+## Scaling
+
+| Network size | Mechanism | Latency | Quality |
+|-------------|-----------|---------|---------|
+| 1K nodes | Flat ModelRegistry | Baseline | Baseline |
+| 100K nodes | Kademlia DHT (iroh) | Same | Better (more specialists) |
+| 1M nodes | Geographic ELO sharding | Reduced | Better |
+| 10M nodes | 40% answered locally (cascade) | Much reduced | Best |
+
+---
+
+## Research Foundation
+
+| Domain | Paper | Key finding |
+|--------|-------|-------------|
+| Swarm inference | [arXiv:2510.24801](https://arxiv.org/abs/2510.24801) | 85.90% GPQA vs 68.69% majority vote |
+| Proof of compute | [arXiv:2501.16007](https://arxiv.org/abs/2501.16007) | 258B/32 tokens, 100% detection, CPU verify |
+| Speculative decoding | [arXiv:2503.01840](https://arxiv.org/abs/2503.01840) | 3-6.5x speedup (EAGLE-3) |
+| Heterogeneous swarm | [arXiv:2602.03794](https://arxiv.org/abs/2602.03794) | 2 diverse agents ≥ 16 homogeneous |
+| Mixture of agents | [arXiv:2406.04692](https://arxiv.org/abs/2406.04692) | 65.1% AlpacaEval, beats GPT-4o |
+| Bittensor analysis | [arXiv:2507.02951](https://arxiv.org/abs/2507.02951) | Stake-reward misalignment |
 
 ---
 
 ## Contributing
 
-1. Fork and clone the repo
+1. Fork and clone
 2. `cargo build` — must compile clean
-3. `cargo build --features burn` — must also compile clean
-4. `cargo test` — all 11 tests must pass
-5. Open a PR with a clear description of the change
-
-Please keep PRs focused — one feature or fix per PR.
+3. `cargo test` — all tests pass
+4. One feature/fix per PR
 
 ---
 
