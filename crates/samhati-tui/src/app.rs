@@ -147,6 +147,7 @@ pub struct App {
 
     // Domain demand (what queries the network is getting)
     pub demand: crate::swarm::DemandStats,
+    pub demand_updated: bool,
 
     // Remote node input (Models tab: press 'r' to add friend's node)
     pub adding_remote_node: bool,
@@ -209,6 +210,7 @@ impl App {
             swarm_nodes: Vec::new(),
             last_round_result: None,
             demand: crate::swarm::DemandStats::load(),
+            demand_updated: false,
 
             adding_remote_node: false,
             remote_url_input: String::new(),

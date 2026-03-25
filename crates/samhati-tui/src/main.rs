@@ -212,6 +212,27 @@ fn main() -> Result<()> {
             }
         }
 
+        // Broadcast demand to network if updated
+        if app.demand_updated {
+            app.demand_updated = false;
+            if let Some(ref nh) = net_handle {
+                nh.broadcast_demand(&app.demand);
+            }
+        }
+
+        // Check for demand updates from other nodes via gossip
+        if let Some(ref nh) = net_handle {
+            while let Ok(update) = nh.demand_rx.try_recv() {
+                // Merge remote demand into our local stats
+                app.demand.code += update.code;
+                app.demand.math += update.math;
+                app.demand.reasoning += update.reasoning;
+                app.demand.general += update.general;
+                app.demand.total = app.demand.code + app.demand.math
+                    + app.demand.reasoning + app.demand.general;
+            }
+        }
+
         // Periodic refresh: check balance, health, txs every 15 seconds
         if last_refresh.elapsed() > Duration::from_secs(15) {
             last_refresh = Instant::now();
@@ -614,7 +635,8 @@ fn check_swarm(
                     }
 
                     app.inferences_served += 1;
-                    app.demand = swarm::DemandStats::load(); // refresh from disk
+                    app.demand = swarm::DemandStats::load();
+                    app.demand_updated = true;
 
                     // Update swarm node display
                     for (id, new_elo) in &result.elo_updates {

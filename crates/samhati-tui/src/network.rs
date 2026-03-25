@@ -27,7 +27,16 @@ const SAMHATI_TOPIC: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 ];
 
-/// Broadcast over gossip when a node announces itself.
+/// Gossip message — either a node announcement or demand update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum GossipMessage {
+    /// Node announcing itself (model, URL, identity)
+    Announce(NodeAnnouncement),
+    /// Node sharing its local demand stats
+    Demand(DemandUpdate),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeAnnouncement {
     pub solana_pubkey: String,
@@ -35,6 +44,16 @@ pub struct NodeAnnouncement {
     pub inference_url: String,
     pub model_name: String,
     pub port: u16,
+}
+
+/// Demand stats broadcast over gossip — each node shares what queries it's seeing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DemandUpdate {
+    pub iroh_node_id: String,
+    pub code: u64,
+    pub math: u64,
+    pub reasoning: u64,
+    pub general: u64,
 }
 
 /// A discovered peer.
@@ -49,13 +68,16 @@ pub struct DiscoveredPeer {
 /// Commands sent from main thread → gossip thread.
 enum GossipCmd {
     SetAnnouncement(NodeAnnouncement),
-    AddBootstrap(String), // hex NodeId
+    AddBootstrap(String),
+    BroadcastDemand(DemandUpdate),
 }
 
 /// Handle to the P2P network, held by the main TUI thread.
 pub struct NetworkHandle {
     /// Receive discovered peers (non-blocking try_recv)
     pub peer_rx: mpsc::Receiver<DiscoveredPeer>,
+    /// Receive demand updates from other nodes
+    pub demand_rx: mpsc::Receiver<DemandUpdate>,
     /// Send commands to the gossip thread
     cmd_tx: mpsc::Sender<GossipCmd>,
     /// Our NodeId
@@ -67,6 +89,7 @@ impl NetworkHandle {
     /// Returns immediately — gossip runs in its own thread + runtime.
     pub fn start(secret_key_bytes: [u8; 32]) -> Result<Self> {
         let (peer_tx, peer_rx) = mpsc::channel::<DiscoveredPeer>();
+        let (demand_tx, demand_rx) = mpsc::channel::<DemandUpdate>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<GossipCmd>();
         let (node_id_tx, node_id_rx) = mpsc::channel::<String>();
 
@@ -79,7 +102,7 @@ impl NetworkHandle {
                     .build()
                     .expect("gossip runtime");
 
-                rt.block_on(gossip_loop(secret_key_bytes, peer_tx, cmd_rx, node_id_tx));
+                rt.block_on(gossip_loop(secret_key_bytes, peer_tx, demand_tx, cmd_rx, node_id_tx));
             })?;
 
         // Wait for the gossip thread to report its NodeId
@@ -89,6 +112,7 @@ impl NetworkHandle {
 
         Ok(Self {
             peer_rx,
+            demand_rx,
             cmd_tx,
             node_id,
         })
@@ -103,12 +127,24 @@ impl NetworkHandle {
     pub fn add_bootstrap(&self, node_id: String) {
         let _ = self.cmd_tx.send(GossipCmd::AddBootstrap(node_id));
     }
+
+    /// Broadcast our local demand stats to the network.
+    pub fn broadcast_demand(&self, stats: &crate::swarm::DemandStats) {
+        let _ = self.cmd_tx.send(GossipCmd::BroadcastDemand(DemandUpdate {
+            iroh_node_id: self.node_id.clone(),
+            code: stats.code,
+            math: stats.math,
+            reasoning: stats.reasoning,
+            general: stats.general,
+        }));
+    }
 }
 
 /// The gossip event loop — runs in its own thread.
 async fn gossip_loop(
     secret_key_bytes: [u8; 32],
     peer_tx: mpsc::Sender<DiscoveredPeer>,
+    demand_tx: mpsc::Sender<DemandUpdate>,
     cmd_rx: mpsc::Receiver<GossipCmd>,
     node_id_tx: mpsc::Sender<String>,
 ) {
@@ -158,7 +194,8 @@ async fn gossip_loop(
             // Periodically broadcast our announcement
             _ = announce_interval.tick() => {
                 if let Some(ref ann) = announcement {
-                    if let Ok(json) = serde_json::to_vec(ann) {
+                    let msg = GossipMessage::Announce(ann.clone());
+                    if let Ok(json) = serde_json::to_vec(&msg) {
                         let _ = gossip_topic.broadcast(json.into()).await;
                     }
                 }
@@ -173,8 +210,13 @@ async fn gossip_loop(
                         GossipCmd::AddBootstrap(peer_id) => {
                             if let Ok(id) = peer_id.parse::<EndpointId>() {
                                 eprintln!("[network] Adding bootstrap peer: {}", &peer_id[..12.min(peer_id.len())]);
-                                // Subscribe again with the new peer — gossip merges subscriptions
                                 let _ = gossip.subscribe_and_join(topic, vec![id]).await;
+                            }
+                        }
+                        GossipCmd::BroadcastDemand(update) => {
+                            let msg = GossipMessage::Demand(update);
+                            if let Ok(json) = serde_json::to_vec(&msg) {
+                                let _ = gossip_topic.broadcast(json.into()).await;
                             }
                         }
                     }
@@ -185,27 +227,34 @@ async fn gossip_loop(
             event = gossip_topic.next() => {
                 let Some(Ok(event)) = event else { break };
                 if let Event::Received(msg) = event {
-                    let Ok(ann) = serde_json::from_slice::<NodeAnnouncement>(&msg.content) else {
+                    let Ok(gossip_msg) = serde_json::from_slice::<GossipMessage>(&msg.content) else {
                         continue;
                     };
-                    // Skip our own or empty announcements
-                    if ann.iroh_node_id == our_id || ann.inference_url.is_empty() {
-                        continue;
+                    match gossip_msg {
+                        GossipMessage::Announce(ann) => {
+                            if ann.iroh_node_id == our_id || ann.inference_url.is_empty() {
+                                continue;
+                            }
+                            eprintln!(
+                                "[network] Discovered: {} running {} at {}",
+                                ann.iroh_node_id.get(..12).unwrap_or(&ann.iroh_node_id),
+                                ann.model_name,
+                                ann.inference_url,
+                            );
+                            let _ = peer_tx.send(DiscoveredPeer {
+                                solana_pubkey: ann.solana_pubkey,
+                                iroh_node_id: ann.iroh_node_id,
+                                inference_url: ann.inference_url,
+                                model_name: ann.model_name,
+                            });
+                        }
+                        GossipMessage::Demand(update) => {
+                            if update.iroh_node_id == our_id {
+                                continue;
+                            }
+                            let _ = demand_tx.send(update);
+                        }
                     }
-
-                    eprintln!(
-                        "[network] Discovered: {} running {} at {}",
-                        ann.iroh_node_id.get(..12).unwrap_or(&ann.iroh_node_id),
-                        ann.model_name,
-                        ann.inference_url,
-                    );
-
-                    let _ = peer_tx.send(DiscoveredPeer {
-                        solana_pubkey: ann.solana_pubkey,
-                        iroh_node_id: ann.iroh_node_id,
-                        inference_url: ann.inference_url,
-                        model_name: ann.model_name,
-                    });
                 }
             }
         }
