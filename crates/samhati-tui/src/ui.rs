@@ -19,7 +19,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let layout = Layout::vertical([
         Constraint::Length(3), // tab bar
         Constraint::Min(1),   // content
-        Constraint::Length(3), // status bar
+        Constraint::Length(1), // status bar (single line, no border)
     ])
     .split(area);
 
@@ -64,6 +64,9 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
+    // Clear content area first to prevent tab overlap artifacts
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
+
     match app.tab {
         Tab::Chat => tabs::chat::draw(frame, app, area),
         Tab::Dashboard => tabs::dashboard::draw(frame, app, area),
@@ -74,51 +77,37 @@ fn draw_content(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let node_status = if app.node_running {
-        Span::styled("● Online", Style::default().fg(Color::Green).bold())
-    } else {
-        Span::styled("● Offline", Style::default().fg(Color::Red).bold())
-    };
+    let node_dot = if app.node_running { "●" } else { "○" };
+    let node_color = if app.node_running { Color::Green } else { Color::Red };
 
     let status = Line::from(vec![
-        Span::styled(" Node: ", Style::default().fg(Color::DarkGray)),
-        node_status,
-        Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("SOL: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!(" {} ", node_dot), Style::default().fg(node_color)),
         Span::styled(
-            format!("{:.2}", app.sol_balance),
-            Style::default().fg(Color::Yellow).bold(),
-        ),
-        Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("ELO: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{}", app.elo_score),
+            format!("ELO:{}", app.elo_score),
             Style::default().fg(PURPLE).bold(),
         ),
-        Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Peers: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{}", app.peers_connected),
-            Style::default().fg(Color::Cyan).bold(),
+            format!("Peers:{}", app.peers_connected),
+            Style::default().fg(Color::Cyan),
         ),
-        Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Wallet: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.1}SOL", app.sol_balance),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             app.wallet_short.clone(),
-            Style::default().fg(Color::White),
+            Style::default().fg(Color::DarkGray),
         ),
-        Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Model: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             app.current_model.clone(),
             Style::default().fg(Color::White),
         ),
     ]);
 
-    let block = Block::bordered()
-        .border_style(Style::default().fg(DIM_PURPLE))
-        .style(Style::default().bg(SURFACE));
-
-    let paragraph = Paragraph::new(status).block(block);
+    let paragraph = Paragraph::new(status).style(Style::default().bg(SURFACE));
     frame.render_widget(paragraph, area);
 }
