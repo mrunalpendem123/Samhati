@@ -48,12 +48,15 @@ fi
 echo "Building (this takes a few minutes first time)..."
 cargo build -p samhati-tui --quiet 2>/dev/null || cargo build -p samhati-tui
 
-# Run
+# Done — tell user to run it manually (can't run TUI from piped bash — stdin is taken)
 echo "
   ╔═══════════════════════════════════════╗
-  ║   Starting Samhati...                 ║
+  ║   Samhati installed!                  ║
+  ║                                       ║
+  ║   Run this command:                   ║
+  ║   cd ~/Samhati && cargo run -p samhati-tui  ║
+  ║                                       ║
   ║   • Models tab → pick a model         ║
   ║   • Chat tab → ask anything           ║
   ╚═══════════════════════════════════════╝
 "
-cargo run -p samhati-tui
