@@ -25,6 +25,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 hex = "0.4"
 tempfile = "3"
+sha2 = "0.10"
 iroh = "0.96"
 iroh-gossip = "0.96"
 tracing = "0.1"

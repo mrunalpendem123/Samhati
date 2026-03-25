@@ -4,6 +4,7 @@ mod events;
 pub mod identity;
 mod model_download;
 pub mod network;
+pub mod registry;
 mod node_runner;
 mod swarm;
 mod tabs;
@@ -79,15 +80,47 @@ fn main() -> Result<()> {
     let mut multi_runner = MultiNodeRunner::new();
     let swarm = Arc::new(SwarmOrchestrator::new());
 
-    // Start P2P network — auto-discover other Samhati nodes via iroh gossip
+    // Start P2P network — auto-discover other Samhati nodes
     let mut net_handle: Option<NetworkHandle> = None;
     if let Some(secret) = identity_secret {
+        // 1. Fetch all registered nodes from Solana (free RPC read)
+        let bootstrap_nodes = rt.block_on(async {
+            match registry::fetch_all_nodes().await {
+                Ok(nodes) => {
+                    eprintln!("[registry] Found {} registered nodes on Solana", nodes.len());
+                    nodes
+                }
+                Err(e) => {
+                    eprintln!("[registry] Failed to fetch nodes: {} (starting without bootstrap)", e);
+                    vec![]
+                }
+            }
+        });
+
+        let bootstrap_count = bootstrap_nodes.len();
+
+        // 2. Start iroh + gossip, bootstrap with on-chain nodes
         match NetworkHandle::start(secret) {
             Ok(nh) => {
                 app.node_id = nh.node_id.clone();
-                app.download_status = format!(
-                    "P2P active — share your Node ID with friends to connect",
-                );
+
+                // Bootstrap gossip with all registered nodes from Solana
+                for node in &bootstrap_nodes {
+                    if node.iroh_node_id != nh.node_id {
+                        nh.add_bootstrap(node.iroh_node_id.clone());
+                    }
+                }
+
+                if bootstrap_count > 0 {
+                    app.download_status = format!(
+                        "Connected to mesh — {} nodes from Solana registry",
+                        bootstrap_count,
+                    );
+                } else {
+                    app.download_status = "P2P active — no nodes on Solana yet (you're first!)".into();
+                }
+
+                app.peers_connected = bootstrap_count as u32;
                 net_handle = Some(nh);
             }
             Err(e) => {
