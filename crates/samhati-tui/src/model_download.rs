@@ -75,14 +75,20 @@ impl ModelDownloader {
 /// These are real repos that actually exist on HuggingFace.
 fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
     let mapping = match model_name {
+        // Tiny
         "Qwen2.5-0.5B" => (
             "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
             "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        ),
+        "Gemma-3-1B" => (
+            "bartowski/gemma-3-1b-it-GGUF",
+            "gemma-3-1b-it-Q4_K_M.gguf",
         ),
         "SmolLM2-1.7B" => (
             "bartowski/SmolLM2-1.7B-Instruct-GGUF",
             "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
         ),
+        // Small
         "Qwen2.5-1.5B" => (
             "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
             "qwen2.5-1.5b-instruct-q4_k_m.gguf",
@@ -99,17 +105,22 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
             "bartowski/Phi-4-mini-instruct-GGUF",
             "Phi-4-mini-instruct-Q4_K_M.gguf",
         ),
-        "Gemma-3-1B" => (
-            "bartowski/gemma-3-1b-it-GGUF",
-            "gemma-3-1b-it-Q4_K_M.gguf",
-        ),
         "Gemma-3-4B" => (
             "bartowski/gemma-3-4b-it-GGUF",
             "gemma-3-4b-it-Q4_K_M.gguf",
         ),
+        // Medium
         "Qwen2.5-7B" => (
             "Qwen/Qwen2.5-7B-Instruct-GGUF",
             "qwen2.5-7b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Coder-7B" => (
+            "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+            "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        ),
+        "DeepSeek-Coder-V2-Lite" => (
+            "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
+            "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
         ),
         "Llama-3.1-8B" => (
             "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
@@ -119,9 +130,22 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
             "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
             "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
         ),
+        // Large
+        "Qwen2.5-14B" => (
+            "Qwen/Qwen2.5-14B-Instruct-GGUF",
+            "qwen2.5-14b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Coder-14B" => (
+            "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+            "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+        ),
+        "DeepSeek-R1-Distill-14B" => (
+            "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+            "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        ),
         _ => {
             return Err(anyhow::anyhow!(
-                "Model not yet available for download: {}",
+                "Model not available for download: {}",
                 model_name
             ))
         }

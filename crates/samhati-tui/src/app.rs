@@ -233,45 +233,29 @@ fn detect_models() -> Vec<ModelInfo> {
     let total_ram_gb = sys.total_memory() as f64 / 1_073_741_824.0;
 
     let mut models = vec![
-        // ── Tiny (0.5-1B) — runs on anything ───────────────────────
-        m("Qwen2.5-0.5B", "0.5B", "General", 0.4, 1.0, "1.0x"),
-        m("SmolLM2-1.7B", "1.7B", "General", 1.0, 2.0, "1.0x"),
+        // ── Tiny — runs on anything ─────────────────────────────────
+        m("Qwen2.5-0.5B",      "0.5B", "General",   0.4, 1.0, "1.0x"),
+        m("Gemma-3-1B",         "1B",   "General",   0.7, 2.0, "1.0x"),
+        m("SmolLM2-1.7B",       "1.7B", "General",   1.0, 2.0, "1.0x"),
 
-        // ── Small (1.5-3B) — laptops, phones 2022+ ─────────────────
-        m("Qwen2.5-1.5B", "1.5B", "General", 1.0, 2.0, "1.0x"),
-        m("Qwen2.5-3B", "3B", "General", 1.8, 4.0, "1.0x"),
-        m("Llama-3.2-3B", "3B", "General", 1.8, 4.0, "1.0x"),
-        m("Phi-4-mini-3.8B", "3.8B", "Reasoning", 2.2, 4.0, "1.3x"),
-        m("Gemma-3-1B", "1B", "General", 0.7, 2.0, "1.0x"),
-        m("Gemma-3-4B", "4B", "General", 2.5, 6.0, "1.0x"),
+        // ── Small — laptops ─────────────────────────────────────────
+        m("Qwen2.5-1.5B",       "1.5B", "General",   1.0, 2.0, "1.0x"),
+        m("Qwen2.5-3B",         "3B",   "General",   1.8, 4.0, "1.0x"),
+        m("Llama-3.2-3B",       "3B",   "General",   1.8, 4.0, "1.0x"),
+        m("Phi-4-mini-3.8B",    "3.8B", "Reasoning", 2.2, 4.0, "1.5x"),
+        m("Gemma-3-4B",         "4B",   "General",   2.5, 6.0, "1.0x"),
 
-        // ── Specialist SLMs (3B, domain-tuned) — whitepaper flywheel ──
-        m("Samhati-Rust-3B", "3B", "Rust", 1.8, 4.0, "1.5x"),
-        m("Samhati-Python-3B", "3B", "Python", 1.8, 4.0, "1.5x"),
-        m("Samhati-Math-3B", "3B", "Math", 1.8, 4.0, "1.5x"),
-        m("Samhati-DeFi-3B", "3B", "DeFi", 1.8, 4.0, "1.5x"),
-        m("Samhati-Science-3B", "3B", "Science", 1.8, 4.0, "1.5x"),
-        m("Samhati-Legal-3B", "3B", "Legal", 1.8, 4.0, "1.5x"),
+        // ── Medium — 16GB+ laptops ──────────────────────────────────
+        m("Qwen2.5-7B",         "7B",   "General",   4.4, 8.0, "1.0x"),
+        m("Qwen2.5-Coder-7B",   "7B",   "Code",      4.4, 8.0, "1.5x"),
+        m("DeepSeek-Coder-V2-Lite", "7B", "Code",     4.4, 8.0, "1.5x"),
+        m("Llama-3.1-8B",       "8B",   "General",   4.7, 8.0, "1.0x"),
+        m("Mistral-7B-v0.3",    "7B",   "General",   4.1, 8.0, "1.0x"),
 
-        // ── Medium (7-8B) — 16GB+ laptops ──────────────────────────
-        m("Qwen2.5-7B", "7B", "General", 4.4, 8.0, "1.0x"),
-        m("Llama-3.1-8B", "8B", "General", 4.7, 8.0, "1.0x"),
-        m("Mistral-7B-v0.3", "7B", "General", 4.1, 8.0, "1.0x"),
-        m("Gemma-3-12B", "12B", "General", 7.0, 12.0, "1.2x"),
-        m("DeepSeek-Coder-V2-Lite", "7B", "Code", 4.4, 8.0, "1.5x"),
-        m("BioMistral-7B", "7B", "Medical", 4.1, 8.0, "2.0x"),
-
-        // ── Large (14-32B) — 32GB+ machines / GPUs ──────────────────
-        m("Qwen2.5-14B", "14B", "General", 8.7, 16.0, "1.3x"),
-        m("Qwen2.5-Coder-14B", "14B", "Code", 8.7, 16.0, "1.5x"),
+        // ── Large — 32GB+ machines ──────────────────────────────────
+        m("Qwen2.5-14B",        "14B",  "General",   8.7, 16.0, "1.3x"),
+        m("Qwen2.5-Coder-14B",  "14B",  "Code",      8.7, 16.0, "1.5x"),
         m("DeepSeek-R1-Distill-14B", "14B", "Reasoning", 8.7, 16.0, "1.8x"),
-        m("Gemma-3-27B", "27B", "General", 16.0, 24.0, "1.3x"),
-        m("Qwen2.5-32B", "32B", "General", 18.5, 32.0, "1.5x"),
-
-        // ── XL (70B+) — GPU servers ─────────────────────────────────
-        m("Llama-3.3-70B", "70B", "General", 38.5, 48.0, "1.5x"),
-        m("DeepSeek-R1-Distill-70B", "70B", "Reasoning", 38.5, 48.0, "2.0x"),
-        m("Qwen2.5-72B", "72B", "General", 40.0, 48.0, "1.5x"),
     ];
 
     // Auto-detect: mark models that fit in 70% of RAM (leave room for OS)
