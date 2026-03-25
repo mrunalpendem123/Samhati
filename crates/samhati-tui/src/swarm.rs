@@ -817,47 +817,17 @@ async fn call_node_with_proof(
         return Err(anyhow::anyhow!("Empty response from node"));
     }
 
-    // Try to extract logprobs and build a TOPLOC proof
-    let proof_hash = if let Some(logprobs_content) = resp["choices"][0]["logprobs"]["content"].as_array() {
-        // Build TOPLOC proof from real logprobs
-        let mut prover = samhati_toploc::prover::ToplocProver::new(model_name, *signing_key);
-
-        for token_entry in logprobs_content {
-            if let Some(top_logprobs) = token_entry["top_logprobs"].as_array() {
-                let logits: Vec<(u32, f32)> = top_logprobs
-                    .iter()
-                    .filter_map(|lp| {
-                        let token_str = lp["token"].as_str()?;
-                        let logprob = lp["logprob"].as_f64()? as f32;
-                        // Use CRC32 of token string as token_id (deterministic)
-                        let token_id = crc32_hash(token_str.as_bytes());
-                        Some((token_id, logprob))
-                    })
-                    .collect();
-
-                if !logits.is_empty() {
-                    let token_logits = samhati_toploc::proof::TokenLogits {
-                        token_id: logits[0].0, // top logit's token is the generated token
-                        top_k: logits,
-                    };
-                    prover.record_token(token_logits);
-                }
-            }
+    // Try to read TOPLOC proof from patched llama-server (intermediate layer activations)
+    let proof_hash = if let Some(proof_hex) = resp["toploc_proof"].as_str() {
+        // Patched llama-server: real activation-level proof (PrimeIntellect strength)
+        let mut hash = [0u8; 32];
+        if let Ok(bytes) = hex::decode(proof_hex) {
+            let len = bytes.len().min(32);
+            hash[..len].copy_from_slice(&bytes[..len]);
         }
-
-        match prover.finalize() {
-            Ok(proof) => {
-                let hash = blake3::hash(&proof.to_bytes());
-                *hash.as_bytes()
-            }
-            Err(_) => {
-                // Not enough tokens for a full chunk — fall back to answer hash
-                let hash = blake3::hash(content.as_bytes());
-                *hash.as_bytes()
-            }
-        }
+        hash
     } else {
-        // No logprobs available — fall back to BLAKE3 hash of answer text
+        // Unpatched llama-server: fall back to BLAKE3 hash of answer text
         let hash = blake3::hash(content.as_bytes());
         *hash.as_bytes()
     };
