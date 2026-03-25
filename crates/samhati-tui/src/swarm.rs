@@ -97,7 +97,13 @@ impl SwarmOrchestrator {
         self.nodes.lock().map(|n| n.clone()).unwrap_or_default()
     }
 
-    /// Run swarm inference with real peer-ranked consensus.
+    /// Run swarm inference with adaptive complexity routing.
+    ///
+    /// Easy queries  → 3 nodes + peer rank
+    /// Hard queries  → 5 nodes + 1 debate round + peer rank
+    ///
+    /// Every query always goes through the swarm. The network always gets
+    /// used, nodes always earn SMTI, answers are always peer-ranked.
     pub async fn infer(&self, prompt: &str) -> Result<SwarmRoundResult> {
         let node_snapshot = {
             let guard = self.nodes.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
@@ -109,11 +115,26 @@ impl SwarmOrchestrator {
         }
 
         let start = Instant::now();
-        let n_nodes = node_snapshot.len();
+        let available = node_snapshot.len();
 
-        // ── Phase 1: Fan out — send prompt to all nodes in parallel ──────
+        // ── Complexity classification ────────────────────────────────────
+        let difficulty = classify_difficulty(prompt);
+        let desired_n = match difficulty {
+            Difficulty::Easy => 3,
+            Difficulty::Medium => 3,
+            Difficulty::Hard => 5,
+        };
+        let n_to_use = desired_n.min(available);
+        let use_debate = difficulty == Difficulty::Hard && n_to_use >= 3;
+
+        // Select nodes: pick top N by ELO (higher ELO = better answers historically)
+        let mut selected = node_snapshot.clone();
+        selected.sort_by(|a, b| b.elo.cmp(&a.elo));
+        selected.truncate(n_to_use);
+
+        // ── Phase 1: Fan out — send prompt to selected nodes in parallel ──
         let mut handles = Vec::new();
-        for node in &node_snapshot {
+        for node in &selected {
             let client = self.client.clone();
             let url = node.url.clone();
             let node_id = node.id.clone();
@@ -161,24 +182,30 @@ impl SwarmOrchestrator {
                 confidence: 1.0,
                 all_answers: answers,
                 elo_updates: vec![],
-                n_nodes,
+                n_nodes: 1,
                 total_time_ms: start.elapsed().as_millis() as u64,
                 rankings: vec![],
             });
         }
 
+        // ── Phase 1.5: Debate round (hard queries only) ─────────────────
+        // Each node sees all other answers and rewrites its own.
+        // From the Multi-Agent Debate paper (arXiv:2305.14325):
+        // agents self-correct by seeing others' reasoning chains.
+        if use_debate {
+            answers = self
+                .debate_round(&selected, &answers, prompt)
+                .await;
+        }
+
         // ── Phase 2: Peer ranking — each node judges all pairs using its LLM ──
-        // Each node ranks C(N,2) pairs, excluding comparisons of its own answer.
-        // This is the Fortytwo mechanism: nodes see all answers and produce
-        // 50-100 token reasoning chains for each pairwise comparison.
         let rankings = self
-            .peer_rank(&node_snapshot, &answers, prompt)
+            .peer_rank(&selected, &answers, prompt)
             .await;
 
         // ── Phase 3: BradleyTerry aggregation on real pairwise preferences ──
         let n = answers.len();
         let (winner_idx, confidence) = if rankings.is_empty() {
-            // Fallback to heuristic if all ranking calls failed
             let scores = heuristic_scores(&answers);
             heuristic_bt_select(&scores)
         } else {
@@ -193,16 +220,100 @@ impl SwarmOrchestrator {
             update_elo(&mut guard, &answers, winner_idx)
         };
 
+        let final_n = answers.len();
         Ok(SwarmRoundResult {
             winner_id: winner.node_id.clone(),
             winning_answer: winner.answer.clone(),
             confidence,
             all_answers: answers,
             elo_updates,
-            n_nodes,
+            n_nodes: final_n,
             total_time_ms: start.elapsed().as_millis() as u64,
             rankings,
         })
+    }
+
+    /// Debate round: each node sees all others' answers and rewrites its own.
+    /// From the Multi-Agent Debate paper (arXiv:2305.14325).
+    /// Only 1 round — most self-correction happens in the first round.
+    async fn debate_round(
+        &self,
+        nodes: &[SwarmNode],
+        answers: &[NodeAnswer],
+        original_prompt: &str,
+    ) -> Vec<NodeAnswer> {
+        let mut handles = Vec::new();
+
+        for (i, node) in nodes.iter().enumerate() {
+            // Find this node's original answer
+            let my_answer = answers.iter()
+                .find(|a| a.node_id == node.id)
+                .map(|a| a.answer.clone())
+                .unwrap_or_default();
+
+            // Collect other nodes' answers (truncated for speed)
+            let others: Vec<String> = answers.iter()
+                .filter(|a| a.node_id != node.id)
+                .map(|a| {
+                    let short: String = a.answer.chars().take(500).collect();
+                    short
+                })
+                .collect();
+
+            if others.is_empty() {
+                continue;
+            }
+
+            let client = self.client.clone();
+            let url = node.url.clone();
+            let node_id = node.id.clone();
+            let model = node.model.clone();
+            let prompt = original_prompt.to_string();
+
+            handles.push(tokio::spawn(async move {
+                let node_start = Instant::now();
+                let result = ask_node_to_debate(
+                    &client, &url, &prompt, &my_answer, &others,
+                ).await;
+                let latency = node_start.elapsed().as_millis() as u64;
+                (node_id, model, result, latency)
+            }));
+        }
+
+        let mut improved: Vec<NodeAnswer> = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok((node_id, model, Ok(answer), latency)) => {
+                    improved.push(NodeAnswer {
+                        node_id,
+                        answer,
+                        latency_ms: latency,
+                        model,
+                    });
+                }
+                Ok((node_id, model, Err(e), _)) => {
+                    eprintln!("Debate failed for {}: {}", node_id, e);
+                    // Fall back to original answer
+                    if let Some(orig) = answers.iter().find(|a| a.node_id == node_id) {
+                        improved.push(orig.clone());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Debate task error: {}", e);
+                }
+            }
+        }
+
+        // If debate produced fewer answers than we started with, keep originals
+        if improved.len() < answers.len() {
+            for orig in answers {
+                if !improved.iter().any(|a| a.node_id == orig.node_id) {
+                    improved.push(orig.clone());
+                }
+            }
+        }
+
+        improved
     }
 
     /// Phase 2: Send all answers to each node for LLM-based pairwise ranking.
@@ -271,6 +382,107 @@ impl SwarmOrchestrator {
 
         rankings
     }
+}
+
+// ── Complexity classifier ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Difficulty {
+    Easy,
+    Medium,
+    Hard,
+}
+
+/// Classify query difficulty. Fast heuristic (< 1ms).
+/// Every query still goes through the swarm — this only controls HOW MANY
+/// nodes and whether debate is used.
+fn classify_difficulty(prompt: &str) -> Difficulty {
+    let lower = prompt.to_lowercase();
+    let word_count = prompt.split_whitespace().count();
+    let mut score: i32 = 0;
+
+    // Hard signals: multi-step reasoning, math, proofs, debugging
+    let hard_signals = [
+        "prove", "derive", "step by step", "theorem", "induction",
+        "debug", "fix this", "find the bug", "what's wrong",
+        "implement", "design a", "architect",
+        "aime", "olympiad", "competition",
+        "∫", "∑", "∂", "lim", "→",
+    ];
+    for sig in hard_signals {
+        if lower.contains(sig) { score += 3; }
+    }
+
+    // Medium signals: code, domain-specific, explanation
+    let medium_signals = [
+        "```", "fn ", "def ", "class ", "import ", "function",
+        "explain how", "compare", "difference between",
+        "write a program", "write code", "algorithm",
+        "analyze", "evaluate", "trade-off",
+    ];
+    for sig in medium_signals {
+        if lower.contains(sig) { score += 2; }
+    }
+
+    // Easy signals: simple questions, greetings, factual lookups
+    let easy_signals = [
+        "what is", "who is", "when was", "where is",
+        "hello", "hi", "hey", "thanks",
+        "translate", "summarize", "define",
+        "list", "name", "how many",
+    ];
+    for sig in easy_signals {
+        if lower.contains(sig) { score -= 1; }
+    }
+
+    // Long prompts with multiple questions tend to be harder
+    let question_marks = prompt.matches('?').count();
+    if question_marks >= 3 { score += 2; }
+    if word_count > 100 { score += 2; }
+    if word_count < 10 { score -= 1; }
+
+    // Multiple code blocks = harder
+    let code_blocks = prompt.matches("```").count() / 2;
+    if code_blocks >= 2 { score += 3; }
+
+    match score {
+        s if s >= 5 => Difficulty::Hard,
+        s if s >= 2 => Difficulty::Medium,
+        _ => Difficulty::Easy,
+    }
+}
+
+// ── Debate function ─────────────────────────────────────────────────
+
+/// Ask a node to rewrite its answer after seeing all other nodes' answers.
+/// From the Multi-Agent Debate paper (arXiv:2305.14325).
+async fn ask_node_to_debate(
+    client: &reqwest::Client,
+    node_url: &str,
+    original_prompt: &str,
+    my_answer: &str,
+    others_answers: &[String],
+) -> Result<String> {
+    let others_text = others_answers
+        .iter()
+        .enumerate()
+        .map(|(i, a)| format!("Agent {} answer:\n{}", i + 1, a))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let debate_prompt = format!(
+        r#"Question: {original_prompt}
+
+Your previous answer:
+{my_answer}
+
+Other agents' answers:
+{others_text}
+
+Using the other agents' answers as additional information, write an improved answer. If others found errors in your reasoning, correct them. If you see errors in theirs, keep your original approach. Give your updated answer directly."#
+    );
+
+    call_node(client, node_url, &debate_prompt).await
 }
 
 /// Ask a node's LLM to compare two answers and pick a winner with reasoning.
