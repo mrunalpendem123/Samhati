@@ -184,10 +184,27 @@ fn main() -> Result<()> {
         // Draw
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
-        // Check for newly discovered P2P peers and auto-add to swarm
+        // Check for newly discovered P2P peers — verify on Solana before adding
         if let Some(ref nh) = net_handle {
             while let Ok(peer) = nh.peer_rx.try_recv() {
-                // Auto-add discovered peer to swarm orchestrator
+                // Skip peers with empty inference URL (presence-only announcements)
+                if peer.inference_url.is_empty() {
+                    continue;
+                }
+
+                // Verify peer is registered on Solana (prevents untrusted nodes)
+                let peer_pubkey = peer.solana_pubkey.clone();
+                let is_registered = rt.block_on(registry::is_registered(&peer_pubkey))
+                    .unwrap_or(false);
+
+                if !is_registered {
+                    eprintln!(
+                        "[security] Rejected unregistered peer: {}",
+                        peer.iroh_node_id.get(..12).unwrap_or(&peer.iroh_node_id),
+                    );
+                    continue;
+                }
+
                 let node_id = format!("p2p-{}",
                     peer.iroh_node_id.get(..8).unwrap_or(&peer.iroh_node_id));
                 swarm.add_node(
@@ -205,7 +222,7 @@ fn main() -> Result<()> {
                 });
                 app.peers_connected = swarm.node_count() as u32;
                 app.download_status = format!(
-                    "Discovered peer {} running {} ({} nodes)",
+                    "Verified peer {} running {} ({} nodes)",
                     peer.iroh_node_id.get(..12).unwrap_or(&peer.iroh_node_id),
                     peer.model_name,
                     swarm.node_count(),
@@ -497,12 +514,17 @@ fn activate_model(
             app.node_error.clear();
             app.download_status = format!("{} is running on port {}", model_name, node_runner.port);
 
-            // Announce to P2P network so other nodes can discover us
+            // Announce to P2P network so other nodes can discover us.
+            // Don't broadcast localhost — remote peers can't reach it
+            // and it would cause confused-deputy SSRF on their machines.
+            // TODO: detect external IP for public nodes.
+            // For now, only announce to gossip with empty URL (presence only,
+            // not inference-ready for remote peers).
             if let Some(ref nh) = net_handle {
                 nh.set_announcement(NodeAnnouncement {
                     solana_pubkey: app.wallet_pubkey.clone(),
                     iroh_node_id: app.node_id.clone(),
-                    inference_url: format!("http://127.0.0.1:{}", node_runner.port),
+                    inference_url: String::new(), // don't broadcast localhost
                     model_name: model_name.clone(),
                     port: node_runner.port,
                 });

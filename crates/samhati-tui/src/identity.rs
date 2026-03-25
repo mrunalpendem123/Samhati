@@ -62,7 +62,13 @@ impl NodeIdentity {
 
             fs::create_dir_all(&samhati_dir)?;
             let json = serde_json::to_string(&bytes)?;
-            fs::write(&identity_path, json)?;
+            fs::write(&identity_path, &json)?;
+            // Set file permissions to 0600 (owner read/write only) — contains private key
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))?;
+            }
             identity_path.clone()
         };
 
@@ -85,6 +91,11 @@ impl NodeIdentity {
         if source_path != identity_path {
             fs::create_dir_all(&samhati_dir)?;
             fs::copy(&source_path, &identity_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).ok();
+            }
         }
 
         let solana_pubkey = bs58::encode(&public_key).into_string();

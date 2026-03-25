@@ -121,13 +121,20 @@ impl SwarmOrchestrator {
             nodes: Arc::new(Mutex::new(Vec::new())),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
+                .redirect(reqwest::redirect::Policy::none()) // Prevent SSRF redirect chains
                 .build()
                 .unwrap_or_default(),
             signing_key,
         }
     }
 
+    /// Add a remote node (from gossip or manual 'r' key). Validates URL for SSRF.
     pub fn add_node(&self, id: String, url: String, model: String) {
+        // Remote nodes: validate URL to prevent SSRF
+        if !is_local_url(&url) && !is_safe_inference_url(&url) {
+            eprintln!("[swarm] Rejected unsafe URL: {}", url);
+            return;
+        }
         // Check if we have a persisted ELO for this node
         let saved_elo = load_elo(&id).unwrap_or(1500);
         if let Ok(mut nodes) = self.nodes.lock() {
@@ -487,6 +494,57 @@ enum Difficulty {
 /// Classify query difficulty. Fast heuristic (< 1ms).
 /// Every query still goes through the swarm — this only controls HOW MANY
 /// nodes and whether debate is used.
+/// Validate that an inference URL is safe (not SSRF target).
+/// Blocks: private IPs, localhost, non-HTTP schemes, metadata endpoints.
+fn is_safe_inference_url(url: &str) -> bool {
+    // Must be HTTP or HTTPS
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return false;
+    }
+
+    // Extract host from URL
+    let host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    if host.is_empty() {
+        return false;
+    }
+
+    // Block localhost and loopback
+    let blocked_hosts = [
+        "localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]",
+    ];
+    if blocked_hosts.contains(&host) {
+        return false;
+    }
+
+    // Block private IP ranges
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        if ip.is_loopback()           // 127.x.x.x
+            || ip.is_private()        // 10.x, 172.16-31.x, 192.168.x
+            || ip.is_link_local()     // 169.254.x.x (AWS metadata)
+            || ip.is_unspecified()    // 0.0.0.0
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Allow localhost URLs explicitly (for local swarm nodes added via 's' key).
+/// These are trusted — the user started them on their own machine.
+fn is_local_url(url: &str) -> bool {
+    url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
+}
+
 fn classify_difficulty(prompt: &str) -> Difficulty {
     let lower = prompt.to_lowercase();
     let word_count = prompt.split_whitespace().count();
