@@ -18,19 +18,20 @@ if ! command -v cargo &> /dev/null; then
     source "$HOME/.cargo/env"
 fi
 
-# Check llama.cpp
-if ! command -v llama-server &> /dev/null; then
-    echo "Installing llama.cpp..."
+# Check cmake (needed to build llama.cpp)
+if ! command -v cmake &> /dev/null; then
+    echo "Installing cmake..."
     if command -v brew &> /dev/null; then
-        brew install llama.cpp
+        brew install cmake
+    elif command -v apt-get &> /dev/null; then
+        sudo apt-get install -y cmake build-essential
     else
-        echo "Please install llama.cpp: https://github.com/ggerganov/llama.cpp"
-        echo "On Ubuntu: sudo apt install cmake build-essential && git clone https://github.com/ggerganov/llama.cpp && cd llama.cpp && cmake -B build && cmake --build build --config Release -t llama-server && sudo cp build/bin/llama-server /usr/local/bin/"
+        echo "Please install cmake: https://cmake.org/download/"
         exit 1
     fi
 fi
 
-# Clone or update
+# Clone or update Samhati
 SAMHATI_DIR="$HOME/Samhati"
 if [ -d "$SAMHATI_DIR" ]; then
     echo "Updating Samhati..."
@@ -44,8 +45,14 @@ else
     cd "$SAMHATI_DIR"
 fi
 
-# Build
-echo "Building (this takes a few minutes first time)..."
+# Build TOPLOC-enabled llama-server (PrimeIntellect-strength proofs)
+if [ ! -f "$SAMHATI_DIR/llama-toploc/bin/llama-server" ]; then
+    echo "Building llama-server with TOPLOC proof-of-compute..."
+    bash "$SAMHATI_DIR/llama-toploc/build.sh"
+fi
+
+# Build Samhati TUI
+echo "Building Samhati TUI..."
 cargo build -p samhati-tui --quiet 2>/dev/null || cargo build -p samhati-tui
 
 # Done — tell user to run it manually (can't run TUI from piped bash — stdin is taken)

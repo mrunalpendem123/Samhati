@@ -28,10 +28,21 @@ impl NodeRunner {
         self.model_name = model_name.to_string();
         self.model_path = model_path.clone();
 
-        // Try llama-server first (most compatible with GGUF)
-        // llama-server provides an OpenAI-compatible API at localhost:8000
-        let child = if which_exists("llama-server") {
-            Command::new("llama-server")
+        // Try TOPLOC-enabled llama-server first (PrimeIntellect-strength proofs)
+        // Falls back to system llama-server if TOPLOC build not available
+        let toploc_server = dirs::home_dir()
+            .unwrap_or_default()
+            .join("Samhati/llama-toploc/bin/llama-server");
+        let server_bin = if toploc_server.exists() {
+            toploc_server.to_string_lossy().to_string()
+        } else if which_exists("llama-server") {
+            "llama-server".to_string()
+        } else {
+            String::new()
+        };
+
+        let child = if !server_bin.is_empty() {
+            Command::new(&server_bin)
                 .args([
                     "-m",
                     &model_path.display().to_string(),
@@ -142,8 +153,19 @@ impl MultiNodeRunner {
         let port = self.next_port;
         self.next_port += 1;
 
-        let child = if which_exists("llama-server") {
-            Command::new("llama-server")
+        let toploc_server = dirs::home_dir()
+            .unwrap_or_default()
+            .join("Samhati/llama-toploc/bin/llama-server");
+        let server_bin = if toploc_server.exists() {
+            toploc_server.to_string_lossy().to_string()
+        } else if which_exists("llama-server") {
+            "llama-server".to_string()
+        } else {
+            String::new()
+        };
+
+        let child = if !server_bin.is_empty() {
+            Command::new(&server_bin)
                 .args([
                     "-m",
                     &model_path.display().to_string(),
