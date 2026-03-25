@@ -35,7 +35,9 @@ SAMHATI_DIR="$HOME/Samhati"
 if [ -d "$SAMHATI_DIR" ]; then
     echo "Updating Samhati..."
     cd "$SAMHATI_DIR"
-    git pull --quiet
+    git stash --quiet 2>/dev/null || true
+    git pull --quiet || git pull
+    git stash pop --quiet 2>/dev/null || true
 else
     echo "Cloning Samhati..."
     git clone --quiet https://github.com/mrunalpendem123/Samhati.git "$SAMHATI_DIR"
