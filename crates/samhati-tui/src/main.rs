@@ -83,15 +83,39 @@ fn main() -> Result<()> {
     // Start P2P network — auto-discover other Samhati nodes
     let mut net_handle: Option<NetworkHandle> = None;
     if let Some(secret) = identity_secret {
-        // 1. Fetch all registered nodes from Solana (free RPC read)
+        let pubkey = app.wallet_pubkey.clone();
+
+        rt.block_on(async {
+            // 1. Check if we're registered on Solana
+            match registry::is_registered(&pubkey).await {
+                Ok(false) => {
+                    eprintln!("[registry] Not registered — registering on Solana...");
+                    let mut secret_arr = [0u8; 32];
+                    secret_arr.copy_from_slice(&secret[..32]);
+                    let mut public_arr = [0u8; 32];
+                    if let Ok(bytes) = bs58::decode(&pubkey).into_vec() {
+                        let len = bytes.len().min(32);
+                        public_arr[..len].copy_from_slice(&bytes[..len]);
+                    }
+                    match registry::register_node(&secret_arr, &public_arr, "samhati-node").await {
+                        Ok(sig) => eprintln!("[registry] Registered! Tx: {}", &sig[..20.min(sig.len())]),
+                        Err(e) => eprintln!("[registry] Registration failed: {} (continuing anyway)", e),
+                    }
+                }
+                Ok(true) => eprintln!("[registry] Already registered on Solana"),
+                Err(e) => eprintln!("[registry] Check failed: {} (continuing anyway)", e),
+            }
+        });
+
+        // 2. Fetch all registered nodes (free RPC read)
         let bootstrap_nodes = rt.block_on(async {
             match registry::fetch_all_nodes().await {
                 Ok(nodes) => {
-                    eprintln!("[registry] Found {} registered nodes on Solana", nodes.len());
+                    eprintln!("[registry] Found {} nodes on Solana", nodes.len());
                     nodes
                 }
                 Err(e) => {
-                    eprintln!("[registry] Failed to fetch nodes: {} (starting without bootstrap)", e);
+                    eprintln!("[registry] Fetch failed: {} (no bootstrap)", e);
                     vec![]
                 }
             }
@@ -99,28 +123,27 @@ fn main() -> Result<()> {
 
         let bootstrap_count = bootstrap_nodes.len();
 
-        // 2. Start iroh + gossip, bootstrap with on-chain nodes
+        // 3. Start iroh + gossip, bootstrap with on-chain nodes
         match NetworkHandle::start(secret) {
             Ok(nh) => {
                 app.node_id = nh.node_id.clone();
 
-                // Bootstrap gossip with all registered nodes from Solana
                 for node in &bootstrap_nodes {
                     if node.iroh_node_id != nh.node_id {
                         nh.add_bootstrap(node.iroh_node_id.clone());
                     }
                 }
 
-                if bootstrap_count > 0 {
+                if bootstrap_count > 1 {
                     app.download_status = format!(
-                        "Connected to mesh — {} nodes from Solana registry",
+                        "Connected to mesh — {} nodes from Solana",
                         bootstrap_count,
                     );
                 } else {
-                    app.download_status = "P2P active — no nodes on Solana yet (you're first!)".into();
+                    app.download_status = "Registered on Solana — waiting for peers".into();
                 }
 
-                app.peers_connected = bootstrap_count as u32;
+                app.peers_connected = bootstrap_count.saturating_sub(1) as u32;
                 net_handle = Some(nh);
             }
             Err(e) => {
