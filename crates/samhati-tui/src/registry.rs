@@ -347,7 +347,6 @@ fn decode_node_account(entry: &AccountEntry) -> Option<RegisteredNode> {
 
 /// Compute Anchor account discriminator: sha256("account:<Name>")[..8]
 fn anchor_discriminator(name: &str) -> [u8; 8] {
-    use std::io::Write;
     let input = format!("account:{}", name);
     let hash = sha256(input.as_bytes());
     let mut disc = [0u8; 8];
