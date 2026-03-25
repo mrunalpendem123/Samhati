@@ -140,6 +140,15 @@ pub fn handler(ctx: Context<SubmitRound>, args: SubmitRoundArgs) -> Result<()> {
         .checked_add(args.smti_emitted)
         .ok_or(SamhatiError::ArithmeticOverflow)?;
 
-    msg!("Round {} submitted with {} participants", args.round_id, n);
+    // Increment domain demand counter.
+    use crate::state::protocol_config::*;
+    match args.domain {
+        DOMAIN_CODE => config.domain_code = config.domain_code.saturating_add(1),
+        DOMAIN_MATH => config.domain_math = config.domain_math.saturating_add(1),
+        DOMAIN_REASONING => config.domain_reasoning = config.domain_reasoning.saturating_add(1),
+        _ => config.domain_general = config.domain_general.saturating_add(1),
+    }
+
+    msg!("Round {} submitted with {} participants, domain={}", args.round_id, n, args.domain);
     Ok(())
 }

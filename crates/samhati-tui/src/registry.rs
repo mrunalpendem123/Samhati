@@ -312,6 +312,63 @@ pub async fn request_airdrop(pubkey: &str) -> Result<String> {
     }
 }
 
+/// Fetch network-wide domain demand from Solana ProtocolConfig PDA.
+/// This is the single source of truth — updated every submit_round.
+pub async fn fetch_demand() -> Result<crate::swarm::DemandStats> {
+    let client = reqwest::Client::new();
+
+    // ProtocolConfig PDA: seeds = [b"config"]
+    let config_pda = derive_config_pda();
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [config_pda, {"encoding": "base64"}]
+    });
+
+    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+
+    if resp["result"]["value"].is_null() {
+        // Config not initialized yet — return zeros
+        return Ok(crate::swarm::DemandStats::default());
+    }
+
+    let data_b64 = resp["result"]["value"]["data"][0]
+        .as_str()
+        .unwrap_or("");
+    let data = base64_decode(data_b64).unwrap_or_default();
+
+    // ProtocolConfig layout after 8-byte discriminator:
+    // authority: 32, smti_mint: 32, reward_vault: 32,
+    // total_rounds: 8, total_smti_emitted: 8, base_emission: 8,
+    // domain_code: 8, domain_math: 8, domain_reasoning: 8, domain_general: 8, bump: 1
+    // Offsets: 8 + 32 + 32 + 32 + 8 + 8 + 8 = 128 for domain_code
+
+    if data.len() < 128 + 32 {
+        return Ok(crate::swarm::DemandStats::default());
+    }
+
+    let code = u64::from_le_bytes(data[128..136].try_into().unwrap_or([0; 8]));
+    let math = u64::from_le_bytes(data[136..144].try_into().unwrap_or([0; 8]));
+    let reasoning = u64::from_le_bytes(data[144..152].try_into().unwrap_or([0; 8]));
+    let general = u64::from_le_bytes(data[152..160].try_into().unwrap_or([0; 8]));
+    let total = code + math + reasoning + general;
+
+    Ok(crate::swarm::DemandStats {
+        code,
+        math,
+        reasoning,
+        general,
+        total,
+    })
+}
+
+/// Derive ProtocolConfig PDA address. Seeds = [b"config"].
+fn derive_config_pda() -> String {
+    let (pda, _) = find_pda(&[b"config"], &program_id_bytes());
+    bs58::encode(&pda).into_string()
+}
+
 // ── Internal helpers ──────────────────────────────────────────────
 
 #[derive(Deserialize)]

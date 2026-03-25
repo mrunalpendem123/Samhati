@@ -220,16 +220,12 @@ fn main() -> Result<()> {
             }
         }
 
-        // Check for demand updates from other nodes via gossip
+        // Refresh demand from Solana every 30 seconds (network-wide, single source of truth)
+        // Also merge any gossip demand updates as a fast path
         if let Some(ref nh) = net_handle {
-            while let Ok(update) = nh.demand_rx.try_recv() {
-                // Merge remote demand into our local stats
-                app.demand.code += update.code;
-                app.demand.math += update.math;
-                app.demand.reasoning += update.reasoning;
-                app.demand.general += update.general;
-                app.demand.total = app.demand.code + app.demand.math
-                    + app.demand.reasoning + app.demand.general;
+            while let Ok(_update) = nh.demand_rx.try_recv() {
+                // Gossip demand is now supplementary — Solana is the source of truth
+                // We'll pick up the real numbers on the next periodic refresh
             }
         }
 
@@ -262,6 +258,13 @@ fn main() -> Result<()> {
                         let w = SolanaWallet { pubkey, keypair_path: std::path::PathBuf::new(), secret_bytes: vec![] };
                         w.get_recent_transactions().await
                     }));
+                }
+            }
+
+            // Fetch network-wide demand from Solana (single source of truth)
+            if let Ok(demand) = rt.block_on(registry::fetch_demand()) {
+                if demand.total > 0 {
+                    app.demand = demand;
                 }
             }
         }
