@@ -25,6 +25,8 @@ pub struct SwarmRoundResult {
     pub n_nodes: usize,
     pub total_time_ms: u64,
     pub rankings: Vec<PairwiseResult>,
+    pub difficulty: String, // "Easy", "Medium", "Hard"
+    pub used_debate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,16 +50,18 @@ pub struct PairwiseResult {
 
 /// The swarm orchestrator — manages nodes and coordinates inference.
 ///
-/// Implements the Fortytwo peer-ranked consensus protocol:
+/// Implements the Fortytwo peer-ranked consensus protocol + debate:
 ///   Phase 1: Fan out prompt to N nodes, collect answers
-///   Phase 2: Send all answers back to each node for LLM-based pairwise ranking
-///            (each node excluded from ranking its own answer)
+///   Phase 1.5: Debate round (hard queries only — agents self-correct)
+///   Phase 2: Peer ranking — each node judges others' answers via LLM
 ///   Phase 3: BradleyTerry aggregation on real pairwise preferences
-///   Phase 4: ELO update
+///   Phase 4: ELO update + persist to disk
 pub struct SwarmOrchestrator {
     nodes: Arc<Mutex<Vec<SwarmNode>>>,
     client: reqwest::Client,
 }
+
+const ELO_FILE: &str = ".samhati/elo.json";
 
 impl SwarmOrchestrator {
     pub fn new() -> Self {
@@ -71,12 +75,14 @@ impl SwarmOrchestrator {
     }
 
     pub fn add_node(&self, id: String, url: String, model: String) {
+        // Check if we have a persisted ELO for this node
+        let saved_elo = load_elo(&id).unwrap_or(1500);
         if let Ok(mut nodes) = self.nodes.lock() {
             nodes.push(SwarmNode {
                 id,
                 url,
                 model,
-                elo: 1500,
+                elo: saved_elo,
                 rounds_played: 0,
                 rounds_won: 0,
             });
@@ -174,6 +180,12 @@ impl SwarmOrchestrator {
         }
 
         // Single answer — return directly
+        let difficulty_str = match difficulty {
+            Difficulty::Easy => "Easy",
+            Difficulty::Medium => "Medium",
+            Difficulty::Hard => "Hard",
+        }.to_string();
+
         if answers.len() == 1 {
             let winner = &answers[0];
             return Ok(SwarmRoundResult {
@@ -185,6 +197,8 @@ impl SwarmOrchestrator {
                 n_nodes: 1,
                 total_time_ms: start.elapsed().as_millis() as u64,
                 rankings: vec![],
+                difficulty: difficulty_str,
+                used_debate: false,
             });
         }
 
@@ -217,7 +231,10 @@ impl SwarmOrchestrator {
         // ── Phase 4: ELO updates ──
         let elo_updates = {
             let mut guard = self.nodes.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
-            update_elo(&mut guard, &answers, winner_idx)
+            let updates = update_elo(&mut guard, &answers, winner_idx);
+            // Persist ELO scores to disk
+            save_all_elos(&guard);
+            updates
         };
 
         let final_n = answers.len();
@@ -230,6 +247,8 @@ impl SwarmOrchestrator {
             n_nodes: final_n,
             total_time_ms: start.elapsed().as_millis() as u64,
             rankings,
+            difficulty: difficulty_str,
+            used_debate: use_debate,
         })
     }
 
@@ -813,6 +832,42 @@ fn update_elo(
     }
 
     updates
+}
+
+// ── ELO persistence ─────────────────────────────────────────────
+
+fn elo_path() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_default().join(ELO_FILE)
+}
+
+/// Load all persisted ELO scores from disk.
+fn load_elo_map() -> std::collections::HashMap<String, i32> {
+    let path = elo_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+/// Load ELO for a specific node.
+fn load_elo(node_id: &str) -> Option<i32> {
+    load_elo_map().get(node_id).copied()
+}
+
+/// Save all node ELO scores to disk.
+fn save_all_elos(nodes: &[SwarmNode]) {
+    let mut map = load_elo_map();
+    for node in nodes {
+        map.insert(node.id.clone(), node.elo);
+    }
+    let path = elo_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        std::fs::write(&path, json).ok();
+    }
 }
 
 #[cfg(test)]

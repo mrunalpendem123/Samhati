@@ -86,7 +86,20 @@ fn main() -> Result<()> {
         let pubkey = app.wallet_pubkey.clone();
 
         rt.block_on(async {
-            // 1. Check if we're registered on Solana
+            // 1. Check SOL balance — new users need an airdrop to register
+            let balance = registry::get_sol_balance(&pubkey).await.unwrap_or(0.0);
+            if balance < 0.01 {
+                eprintln!("[registry] Low balance ({:.4} SOL) — requesting devnet airdrop...", balance);
+                match registry::request_airdrop(&pubkey).await {
+                    Ok(_) => {
+                        eprintln!("[registry] Airdrop received — waiting for confirmation...");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => eprintln!("[registry] Airdrop failed: {} (may already have SOL)", e),
+                }
+            }
+
+            // 2. Check if we're registered on Solana
             match registry::is_registered(&pubkey).await {
                 Ok(false) => {
                     eprintln!("[registry] Not registered — registering on Solana...");
@@ -572,11 +585,13 @@ fn check_swarm(
             match rt.block_on(handle) {
                 Ok(Ok(result)) => {
                     // Build assistant message with swarm metadata
+                    let debate_tag = if result.used_debate { " + debate" } else { "" };
                     let meta = format!(
-                        "[Swarm: {} won | {:.0}% confidence | {} nodes | {}ms]",
-                        result.winner_id,
-                        result.confidence * 100.0,
+                        "[{} | {} nodes{} | {:.0}% conf | {}ms]",
+                        result.difficulty,
                         result.n_nodes,
+                        debate_tag,
+                        result.confidence * 100.0,
                         result.total_time_ms,
                     );
                     let content = format!("{}\n\n{}", result.winning_answer, meta);

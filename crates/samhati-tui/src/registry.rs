@@ -282,6 +282,36 @@ fn compact_u16(buf: &mut Vec<u8>, val: u16) {
     }
 }
 
+/// Get SOL balance for a pubkey (for checking if airdrop is needed).
+pub async fn get_sol_balance(pubkey: &str) -> Result<f64> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getBalance",
+        "params": [pubkey]
+    });
+    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+    let lamports = resp["result"]["value"].as_u64().unwrap_or(0);
+    Ok(lamports as f64 / 1_000_000_000.0)
+}
+
+/// Request 1 SOL airdrop on devnet (free, for new users to register).
+pub async fn request_airdrop(pubkey: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "requestAirdrop",
+        "params": [pubkey, 1_000_000_000u64] // 1 SOL
+    });
+    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+    if let Some(sig) = resp["result"].as_str() {
+        Ok(sig.to_string())
+    } else {
+        let err = resp["error"]["message"].as_str().unwrap_or("unknown");
+        bail!("Airdrop failed: {}", err)
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
