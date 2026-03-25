@@ -149,6 +149,9 @@ pub struct App {
     pub demand: crate::swarm::DemandStats,
     pub demand_updated: bool,
 
+    // Pending Solana settlement
+    pub pending_settlement: Option<crate::settlement::RoundPayload>,
+
     // Remote node input (Models tab: press 'r' to add friend's node)
     pub adding_remote_node: bool,
     pub remote_url_input: String,
@@ -211,6 +214,7 @@ impl App {
             last_round_result: None,
             demand: crate::swarm::DemandStats::load(),
             demand_updated: false,
+            pending_settlement: None,
 
             adding_remote_node: false,
             remote_url_input: String::new(),

@@ -89,17 +89,29 @@ pub async fn fetch_all_nodes() -> Result<Vec<RegisteredNode>> {
 }
 
 /// Check if our node is already registered on-chain.
+/// Uses getProgramAccounts with memcmp filter on operator pubkey (avoids PDA derivation).
 pub async fn is_registered(our_pubkey: &str) -> Result<bool> {
     let client = reqwest::Client::new();
+    let discriminator = anchor_discriminator("NodeAccount");
+    let disc_base64 = base64_encode(&discriminator);
 
     let pubkey_bytes = bs58::decode(our_pubkey).into_vec()?;
-    let pda = derive_node_pda_address(&pubkey_bytes);
+    let pubkey_base64 = base64_encode(&pubkey_bytes);
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "getAccountInfo",
-        "params": [pda, {"encoding": "base64"}]
+        "method": "getProgramAccounts",
+        "params": [
+            PROGRAM_ID,
+            {
+                "encoding": "base64",
+                "filters": [
+                    {"memcmp": {"offset": 0, "bytes": disc_base64, "encoding": "base64"}},
+                    {"memcmp": {"offset": 8, "bytes": pubkey_base64, "encoding": "base64"}}
+                ]
+            }
+        ]
     });
 
     let resp: serde_json::Value = client
@@ -110,7 +122,8 @@ pub async fn is_registered(our_pubkey: &str) -> Result<bool> {
         .json()
         .await?;
 
-    Ok(!resp["result"]["value"].is_null())
+    let count = resp["result"].as_array().map(|a| a.len()).unwrap_or(0);
+    Ok(count > 0)
 }
 
 /// Register our node on Solana. Sends the `register_node` instruction.
@@ -124,8 +137,11 @@ pub async fn register_node(
     let signing_key = SigningKey::from_bytes(secret_key);
     let our_pubkey = bs58::encode(public_key).into_string();
 
-    // 1. Derive PDA for our NodeAccount
-    let (pda, bump) = find_pda(&[b"node", public_key], &program_id_bytes());
+    // 1. Derive PDA for our NodeAccount using solana CLI (guaranteed correct)
+    let pda_str = solana_find_pda(&["string:node", &format!("pubkey:{}", our_pubkey)])?;
+    let pda_vec = bs58::decode(&pda_str).into_vec()?;
+    let mut pda = [0u8; 32];
+    pda.copy_from_slice(&pda_vec[..32]);
 
     // 2. Get recent blockhash
     let bh_body = serde_json::json!({
@@ -282,6 +298,127 @@ fn compact_u16(buf: &mut Vec<u8>, val: u16) {
     }
 }
 
+/// Submit a swarm round to Solana. Records ELO deltas, proof hashes, domain, and winner.
+/// Only works if our key is the coordinator authority.
+pub async fn submit_round(
+    secret_key: &[u8; 32],
+    public_key: &[u8; 32],
+    payload: &crate::settlement::RoundPayload,
+) -> Result<String> {
+    let client = reqwest::Client::new();
+    let signing_key = SigningKey::from_bytes(secret_key);
+    let our_pubkey = bs58::encode(public_key).into_string();
+
+    // Derive PDAs using solana CLI
+    let config_pda_str = solana_find_pda(&["string:config"])
+        .unwrap_or_else(|_| "5LE13zvQJhCQRrCbwJt4mmgvK1kMnDaQxPLo5Q2pbL2L".into());
+    let config_pda = bs58::decode(&config_pda_str).into_vec()?;
+
+    let round_id_bytes = payload.round_id.to_le_bytes();
+    let round_id_hex = hex::encode(&round_id_bytes);
+    let round_pda_str = solana_find_pda(&["string:round", &format!("hex:{}", round_id_hex)])?;
+    let round_pda = bs58::decode(&round_pda_str).into_vec()?;
+
+    // Get recent blockhash
+    let bh_body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getLatestBlockhash",
+        "params": [{"commitment": "finalized"}]
+    });
+    let bh_resp: serde_json::Value = client.post(RPC_URL).json(&bh_body).send().await?.json().await?;
+    let blockhash_str = bh_resp["result"]["value"]["blockhash"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get blockhash"))?;
+    let blockhash = bs58::decode(blockhash_str).into_vec()?;
+
+    // Build instruction data: anchor discriminator + SubmitRoundArgs (Borsh)
+    let ix_disc = anchor_ix_discriminator("submit_round");
+    let mut ix_data = Vec::new();
+    ix_data.extend_from_slice(&ix_disc);
+
+    // round_id: u64
+    ix_data.extend_from_slice(&payload.round_id.to_le_bytes());
+
+    // participants: Vec<Pubkey> (for now, use our own pubkey as placeholder)
+    ix_data.extend_from_slice(&1u32.to_le_bytes()); // 1 participant
+    ix_data.extend_from_slice(public_key);            // our pubkey
+
+    // proof_hashes: Vec<[u8;32]>
+    ix_data.extend_from_slice(&(payload.proof_hashes.len() as u32).to_le_bytes());
+    for hash in &payload.proof_hashes {
+        ix_data.extend_from_slice(hash);
+    }
+
+    // elo_deltas: Vec<i32>
+    ix_data.extend_from_slice(&(payload.elo_deltas.len() as u32).to_le_bytes());
+    for delta in &payload.elo_deltas {
+        ix_data.extend_from_slice(&delta.to_le_bytes());
+    }
+
+    // winner: Pubkey (our pubkey for single-node rounds)
+    ix_data.extend_from_slice(public_key);
+
+    // smti_emitted: u64
+    ix_data.extend_from_slice(&payload.smti_emitted.to_le_bytes());
+
+    // domain: u64
+    ix_data.extend_from_slice(&payload.domain.to_le_bytes());
+
+    // Build transaction
+    let program_id = program_id_bytes();
+    let system_program = [0u8; 32];
+
+    let mut config_pda_arr = [0u8; 32];
+    config_pda_arr.copy_from_slice(&config_pda[..32]);
+    let mut round_pda_arr = [0u8; 32];
+    round_pda_arr.copy_from_slice(&round_pda[..32]);
+
+    // Node account PDA for our pubkey
+    let node_pda_str = solana_find_pda(&["string:node", &format!("pubkey:{}", our_pubkey)])
+        .unwrap_or_default();
+    let node_pda = if !node_pda_str.is_empty() {
+        bs58::decode(&node_pda_str).into_vec().unwrap_or_default()
+    } else {
+        vec![0u8; 32]
+    };
+    let mut node_pda_arr = [0u8; 32];
+    if node_pda.len() >= 32 {
+        node_pda_arr.copy_from_slice(&node_pda[..32]);
+    }
+
+    let tx = build_transaction(
+        public_key,
+        &blockhash,
+        &program_id,
+        &[
+            AccountMeta { pubkey: *public_key, is_signer: true, is_writable: true },
+            AccountMeta { pubkey: config_pda_arr, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: round_pda_arr, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: system_program, is_signer: false, is_writable: false },
+            // remaining_accounts: node PDAs
+            AccountMeta { pubkey: node_pda_arr, is_signer: false, is_writable: true },
+        ],
+        &ix_data,
+        &signing_key,
+    );
+
+    let tx_base64 = base64_encode(&tx);
+    let send_body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "sendTransaction",
+        "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
+    });
+
+    let send_resp: serde_json::Value = client.post(RPC_URL).json(&send_body).send().await?.json().await?;
+
+    if let Some(sig) = send_resp["result"].as_str() {
+        Ok(sig.to_string())
+    } else {
+        let err = send_resp["error"]["message"].as_str().unwrap_or("unknown error");
+        bail!("submit_round failed: {}", err)
+    }
+}
+
 /// Get SOL balance for a pubkey (for checking if airdrop is needed).
 pub async fn get_sol_balance(pubkey: &str) -> Result<f64> {
     let client = reqwest::Client::new();
@@ -318,7 +455,8 @@ pub async fn fetch_demand() -> Result<crate::swarm::DemandStats> {
     let client = reqwest::Client::new();
 
     // ProtocolConfig PDA: seeds = [b"config"]
-    let config_pda = derive_config_pda();
+    let config_pda = solana_find_pda(&["string:config"])
+        .unwrap_or_else(|_| "5LE13zvQJhCQRrCbwJt4mmgvK1kMnDaQxPLo5Q2pbL2L".into());
 
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1,
@@ -509,6 +647,34 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(result)
+}
+
+/// Get a PDA address using the `solana` CLI (guaranteed correct).
+/// Seeds are in the format: "string:config", "pubkey:ABC123..."
+fn solana_find_pda(seeds: &[&str]) -> Result<String> {
+    let mut args = vec![
+        "find-program-derived-address".to_string(),
+        PROGRAM_ID.to_string(),
+    ];
+    for seed in seeds {
+        args.push(seed.to_string());
+    }
+
+    let output = std::process::Command::new("solana")
+        .args(&args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("solana CLI not found: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("solana find-program-derived-address failed: {}", stderr);
+    }
+
+    let pda = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pda.is_empty() {
+        bail!("Empty PDA from solana CLI");
+    }
+    Ok(pda)
 }
 
 /// Anchor instruction discriminator: sha256("global:<name>")[..8]

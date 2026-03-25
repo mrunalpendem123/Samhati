@@ -213,6 +213,26 @@ fn main() -> Result<()> {
             }
         }
 
+        // Submit pending round to Solana (async, off critical path)
+        if let Some(payload) = app.pending_settlement.take() {
+            if let Some(secret) = identity_secret {
+                let pubkey_clone = app.wallet_pubkey.clone();
+                rt.spawn(async move {
+                    let mut secret_arr = [0u8; 32];
+                    secret_arr.copy_from_slice(&secret[..32]);
+                    let mut public_arr = [0u8; 32];
+                    if let Ok(bytes) = bs58::decode(&pubkey_clone).into_vec() {
+                        let len = bytes.len().min(32);
+                        public_arr[..len].copy_from_slice(&bytes[..len]);
+                    }
+                    match registry::submit_round(&secret_arr, &public_arr, &payload).await {
+                        Ok(sig) => eprintln!("[settlement] Round {} on-chain: {}", payload.round_id, &sig[..20.min(sig.len())]),
+                        Err(e) => eprintln!("[settlement] Round {} failed: {}", payload.round_id, e),
+                    }
+                });
+            }
+        }
+
         // Broadcast demand to network if updated
         if app.demand_updated {
             app.demand_updated = false;
@@ -642,12 +662,13 @@ fn check_swarm(
                     app.demand = swarm::DemandStats::load();
                     app.demand_updated = true;
 
-                    // Settle round: save to pending + record on-chain later
+                    // Settle round: save locally
                     let round_id = settlement::next_round_id();
                     let payload = settlement::build_payload(&result, round_id);
                     if let Err(e) = settlement::save_pending(&payload) {
                         eprintln!("[settlement] Failed to save round: {}", e);
                     }
+                    app.pending_settlement = Some(payload);
 
                     // Update swarm node display
                     for (id, new_elo) in &result.elo_updates {
