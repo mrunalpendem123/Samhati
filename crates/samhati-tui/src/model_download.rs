@@ -75,10 +75,14 @@ impl ModelDownloader {
 /// These are real repos that actually exist on HuggingFace.
 fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
     let mapping = match model_name {
-        // Tiny
+        // ── Tiny ──────────────────────────────────────────────────
         "Qwen2.5-0.5B" => (
             "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
             "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Coder-0.5B" => (
+            "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+            "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
         ),
         "Gemma-3-1B" => (
             "bartowski/gemma-3-1b-it-GGUF",
@@ -88,14 +92,26 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
             "bartowski/SmolLM2-1.7B-Instruct-GGUF",
             "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
         ),
-        // Small
+        // ── Small ─────────────────────────────────────────────────
         "Qwen2.5-1.5B" => (
             "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
             "qwen2.5-1.5b-instruct-q4_k_m.gguf",
         ),
+        "Qwen2.5-Coder-1.5B" => (
+            "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+            "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Math-1.5B" => (
+            "bartowski/Qwen2.5-Math-1.5B-Instruct-GGUF",
+            "Qwen2.5-Math-1.5B-Instruct-Q4_K_M.gguf",
+        ),
         "Qwen2.5-3B" => (
             "Qwen/Qwen2.5-3B-Instruct-GGUF",
             "qwen2.5-3b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Coder-3B" => (
+            "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+            "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
         ),
         "Llama-3.2-3B" => (
             "bartowski/Llama-3.2-3B-Instruct-GGUF",
@@ -109,7 +125,7 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
             "bartowski/gemma-3-4b-it-GGUF",
             "gemma-3-4b-it-Q4_K_M.gguf",
         ),
-        // Medium
+        // ── Medium ────────────────────────────────────────────────
         "Qwen2.5-7B" => (
             "Qwen/Qwen2.5-7B-Instruct-GGUF",
             "qwen2.5-7b-instruct-q4_k_m.gguf",
@@ -117,6 +133,10 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
         "Qwen2.5-Coder-7B" => (
             "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
             "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        ),
+        "Qwen2.5-Math-7B" => (
+            "bartowski/Qwen2.5-Math-7B-Instruct-GGUF",
+            "Qwen2.5-Math-7B-Instruct-Q4_K_M.gguf",
         ),
         "DeepSeek-Coder-V2-Lite" => (
             "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
@@ -130,7 +150,7 @@ fn map_model_to_hf(model_name: &str) -> Result<(&'static str, &'static str)> {
             "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
             "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
         ),
-        // Large
+        // ── Large ─────────────────────────────────────────────────
         "Qwen2.5-14B" => (
             "Qwen/Qwen2.5-14B-Instruct-GGUF",
             "qwen2.5-14b-instruct-q4_k_m.gguf",

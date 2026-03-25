@@ -234,28 +234,33 @@ fn detect_models() -> Vec<ModelInfo> {
 
     let mut models = vec![
         // ── Tiny — runs on anything ─────────────────────────────────
-        m("Qwen2.5-0.5B",      "0.5B", "General",   0.4, 1.0, "1.0x"),
-        m("Gemma-3-1B",         "1B",   "General",   0.7, 2.0, "1.0x"),
-        m("SmolLM2-1.7B",       "1.7B", "General",   1.0, 2.0, "1.0x"),
+        m("Qwen2.5-0.5B",           "0.5B", "General",   0.4, 1.0, "1.0x"),
+        m("Qwen2.5-Coder-0.5B",     "0.5B", "Code",      0.4, 1.0, "1.5x"),
+        m("Gemma-3-1B",              "1B",   "General",   0.7, 2.0, "1.0x"),
+        m("SmolLM2-1.7B",            "1.7B", "General",   1.0, 2.0, "1.0x"),
 
         // ── Small — laptops ─────────────────────────────────────────
-        m("Qwen2.5-1.5B",       "1.5B", "General",   1.0, 2.0, "1.0x"),
-        m("Qwen2.5-3B",         "3B",   "General",   1.8, 4.0, "1.0x"),
-        m("Llama-3.2-3B",       "3B",   "General",   1.8, 4.0, "1.0x"),
-        m("Phi-4-mini-3.8B",    "3.8B", "Reasoning", 2.2, 4.0, "1.5x"),
-        m("Gemma-3-4B",         "4B",   "General",   2.5, 6.0, "1.0x"),
+        m("Qwen2.5-1.5B",            "1.5B", "General",   1.0, 2.0, "1.0x"),
+        m("Qwen2.5-Coder-1.5B",      "1.5B", "Code",      1.0, 2.0, "1.5x"),
+        m("Qwen2.5-Math-1.5B",       "1.5B", "Math",      1.0, 2.0, "1.5x"),
+        m("Qwen2.5-3B",              "3B",   "General",   1.8, 4.0, "1.0x"),
+        m("Qwen2.5-Coder-3B",        "3B",   "Code",      1.8, 4.0, "1.5x"),
+        m("Llama-3.2-3B",            "3B",   "General",   1.8, 4.0, "1.0x"),
+        m("Phi-4-mini-3.8B",         "3.8B", "Reasoning", 2.2, 4.0, "1.5x"),
+        m("Gemma-3-4B",              "4B",   "General",   2.5, 6.0, "1.0x"),
 
         // ── Medium — 16GB+ laptops ──────────────────────────────────
-        m("Qwen2.5-7B",         "7B",   "General",   4.4, 8.0, "1.0x"),
-        m("Qwen2.5-Coder-7B",   "7B",   "Code",      4.4, 8.0, "1.5x"),
-        m("DeepSeek-Coder-V2-Lite", "7B", "Code",     4.4, 8.0, "1.5x"),
-        m("Llama-3.1-8B",       "8B",   "General",   4.7, 8.0, "1.0x"),
-        m("Mistral-7B-v0.3",    "7B",   "General",   4.1, 8.0, "1.0x"),
+        m("Qwen2.5-7B",              "7B",   "General",   4.4, 8.0, "1.0x"),
+        m("Qwen2.5-Coder-7B",        "7B",   "Code",      4.4, 8.0, "1.5x"),
+        m("Qwen2.5-Math-7B",         "7B",   "Math",      4.4, 8.0, "1.5x"),
+        m("DeepSeek-Coder-V2-Lite",  "7B",   "Code",      4.4, 8.0, "1.5x"),
+        m("Llama-3.1-8B",            "8B",   "General",   4.7, 8.0, "1.0x"),
+        m("Mistral-7B-v0.3",         "7B",   "General",   4.1, 8.0, "1.0x"),
 
         // ── Large — 32GB+ machines ──────────────────────────────────
-        m("Qwen2.5-14B",        "14B",  "General",   8.7, 16.0, "1.3x"),
-        m("Qwen2.5-Coder-14B",  "14B",  "Code",      8.7, 16.0, "1.5x"),
-        m("DeepSeek-R1-Distill-14B", "14B", "Reasoning", 8.7, 16.0, "1.8x"),
+        m("Qwen2.5-14B",             "14B",  "General",   8.7, 16.0, "1.3x"),
+        m("Qwen2.5-Coder-14B",       "14B",  "Code",      8.7, 16.0, "1.5x"),
+        m("DeepSeek-R1-Distill-14B",  "14B",  "Reasoning", 8.7, 16.0, "1.8x"),
     ];
 
     // Auto-detect: mark models that fit in 70% of RAM (leave room for OS)
