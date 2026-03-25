@@ -17,29 +17,76 @@
 #include <vector>
 #include <mutex>
 
-// Minimal BLAKE3 implementation (single-block, sufficient for activation hashing)
-// In production, use the official BLAKE3 library. This is a simplified version
-// using the core compression function.
+// BLAKE3 compression using the standard algorithm (7 rounds, proper G function).
+// Uses BLAKE3 IV and message permutation from the specification.
 static inline void blake3_hash_256(const void* data, size_t len, uint8_t out[32]) {
-    // Use a simple hash: SHA-256-like Merkle-Damgard with BLAKE3 constants
-    // For a real deployment, link against the blake3 C library.
-    // This simplified version XOR-folds the data into 32 bytes.
-    memset(out, 0, 32);
-    const uint8_t* bytes = (const uint8_t*)data;
-    for (size_t i = 0; i < len; i++) {
-        out[i % 32] ^= bytes[i];
-        // Mix bits
-        uint8_t carry = out[i % 32];
-        out[(i + 7) % 32] ^= (carry >> 3) | (carry << 5);
-        out[(i + 13) % 32] ^= (carry >> 5) | (carry << 3);
-    }
-    // Final mixing rounds
-    for (int round = 0; round < 8; round++) {
-        for (int j = 0; j < 32; j++) {
-            out[j] ^= out[(j + 11) % 32];
-            out[(j + 3) % 32] += out[j];
+    static const uint32_t IV[8] = {
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+        0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
+    };
+    static const uint8_t MSG_PERM[16] = {
+        2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
+    };
+    #define ROTR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+    #define B3G(a, b, c, d, mx, my) do { \
+        a += b + mx; d ^= a; d = ROTR32(d, 16); \
+        c += d; b ^= c; b = ROTR32(b, 12); \
+        a += b + my; d ^= a; d = ROTR32(d, 8); \
+        c += d; b ^= c; b = ROTR32(b, 7); \
+    } while(0)
+
+    uint32_t h[8];
+    memcpy(h, IV, 32);
+    const uint8_t* input = (const uint8_t*)data;
+    size_t offset = 0;
+    uint32_t counter = 0;
+
+    do {
+        uint8_t block[64];
+        memset(block, 0, 64);
+        size_t blen = (len > offset) ? ((len - offset) < 64 ? (len - offset) : 64) : 0;
+        if (blen > 0) memcpy(block, input + offset, blen);
+
+        uint32_t flags = 0;
+        if (offset == 0) flags |= 1;
+        if (offset + 64 >= len) flags |= 2 | 8;
+
+        uint32_t m[16];
+        for (int i = 0; i < 16; i++)
+            m[i] = (uint32_t)block[4*i] | ((uint32_t)block[4*i+1]<<8) |
+                    ((uint32_t)block[4*i+2]<<16) | ((uint32_t)block[4*i+3]<<24);
+
+        uint32_t s[16];
+        memcpy(s, h, 32);
+        s[8]=IV[0]; s[9]=IV[1]; s[10]=IV[2]; s[11]=IV[3];
+        s[12]=counter; s[13]=0; s[14]=(uint32_t)blen; s[15]=flags;
+
+        uint32_t msg[16];
+        memcpy(msg, m, 64);
+        for (int r = 0; r < 7; r++) {
+            B3G(s[0],s[4],s[8], s[12],msg[0], msg[1]);
+            B3G(s[1],s[5],s[9], s[13],msg[2], msg[3]);
+            B3G(s[2],s[6],s[10],s[14],msg[4], msg[5]);
+            B3G(s[3],s[7],s[11],s[15],msg[6], msg[7]);
+            B3G(s[0],s[5],s[10],s[15],msg[8], msg[9]);
+            B3G(s[1],s[6],s[11],s[12],msg[10],msg[11]);
+            B3G(s[2],s[7],s[8], s[13],msg[12],msg[13]);
+            B3G(s[3],s[4],s[9], s[14],msg[14],msg[15]);
+            uint32_t tmp[16];
+            for (int i = 0; i < 16; i++) tmp[i] = msg[MSG_PERM[i]];
+            memcpy(msg, tmp, 64);
         }
+        for (int i = 0; i < 8; i++) h[i] = s[i] ^ s[i+8];
+        offset += 64;
+        counter++;
+    } while (offset < len);
+
+    for (int i = 0; i < 8; i++) {
+        out[4*i]=(uint8_t)h[i]; out[4*i+1]=(uint8_t)(h[i]>>8);
+        out[4*i+2]=(uint8_t)(h[i]>>16); out[4*i+3]=(uint8_t)(h[i]>>24);
     }
+    #undef ROTR32
+    #undef B3G
 }
 
 struct toploc_layer_hash {

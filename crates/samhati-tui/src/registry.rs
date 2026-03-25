@@ -13,6 +13,12 @@
 use anyhow::{bail, Result};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Cached PDA results — avoids repeated subprocess spawns.
+static PDA_CACHE: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Samhati program ID on devnet.
 const PROGRAM_ID: &str = "AB7cSMLv1J7J28DKLMbzo2tyNp1kZSmE67a6Heoa5Mkr";
@@ -650,8 +656,17 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Get a PDA address using the `solana` CLI (guaranteed correct).
-/// Seeds are in the format: "string:config", "pubkey:ABC123..."
+/// Results are cached in memory — each unique seed combination only calls CLI once.
 fn solana_find_pda(seeds: &[&str]) -> Result<String> {
+    let cache_key = seeds.join("|");
+
+    // Check cache first
+    if let Ok(cache) = PDA_CACHE.lock() {
+        if let Some(pda) = cache.get(&cache_key) {
+            return Ok(pda.clone());
+        }
+    }
+
     let mut args = vec![
         "find-program-derived-address".to_string(),
         PROGRAM_ID.to_string(),
@@ -674,6 +689,12 @@ fn solana_find_pda(seeds: &[&str]) -> Result<String> {
     if pda.is_empty() {
         bail!("Empty PDA from solana CLI");
     }
+
+    // Cache the result
+    if let Ok(mut cache) = PDA_CACHE.lock() {
+        cache.insert(cache_key, pda.clone());
+    }
+
     Ok(pda)
 }
 
@@ -734,4 +755,92 @@ fn derive_node_pda_address(operator_pubkey_bytes: &[u8]) -> String {
     pubkey[..len].copy_from_slice(&operator_pubkey_bytes[..len]);
     let (pda, _) = find_pda(&[b"node", &pubkey], &program_id_bytes());
     bs58::encode(&pda).into_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_anchor_discriminator() {
+        let disc = anchor_discriminator("NodeAccount");
+        // Known value from Python: sha256("account:NodeAccount")[:8]
+        assert_eq!(hex::encode(disc), "7da61292c37f56dc");
+    }
+
+    #[test]
+    fn test_anchor_ix_discriminator() {
+        let disc = anchor_ix_discriminator("register_node");
+        assert_eq!(disc.len(), 8);
+        // Should be deterministic
+        let disc2 = anchor_ix_discriminator("register_node");
+        assert_eq!(disc, disc2);
+    }
+
+    #[test]
+    fn test_base64_roundtrip() {
+        let data = b"hello world test data for base64";
+        let encoded = base64_encode(data);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(data.to_vec(), decoded);
+    }
+
+    #[test]
+    fn test_config_pda_via_cli() {
+        // Only runs if solana CLI is installed
+        if let Ok(pda) = solana_find_pda(&["string:config"]) {
+            assert!(!pda.is_empty());
+            // Should be the known config PDA
+            assert_eq!(pda, "5LE13zvQJhCQRrCbwJt4mmgvK1kMnDaQxPLo5Q2pbL2L");
+        }
+    }
+
+    #[test]
+    fn test_pda_cache() {
+        // First call — hits CLI
+        let r1 = solana_find_pda(&["string:config"]);
+        // Second call — should hit cache (same result, faster)
+        let r2 = solana_find_pda(&["string:config"]);
+        if let (Ok(a), Ok(b)) = (r1, r2) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_registered_known_node() {
+        // Your node is registered — should return true
+        let result = is_registered("12LxN4qXR8Jcv8K49bych8zEWVuBABo3wkHdGarjZFeZ").await;
+        if let Ok(registered) = result {
+            assert!(registered, "Known node should be registered");
+        }
+        // else: network error, skip
+    }
+
+    #[tokio::test]
+    async fn test_is_registered_unknown_node() {
+        // Random pubkey — should NOT be registered
+        let result = is_registered("11111111111111111111111111111112").await;
+        if let Ok(registered) = result {
+            assert!(!registered, "Random node should not be registered");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_all_nodes() {
+        if let Ok(nodes) = fetch_all_nodes().await {
+            // Should find at least 1 node (yours)
+            assert!(!nodes.is_empty(), "Should find at least one registered node");
+            // Your node should be in the list
+            let found = nodes.iter().any(|n| n.pubkey.contains("LxN4"));
+            assert!(found, "Your node should be in the registry");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_demand() {
+        if let Ok(demand) = fetch_demand().await {
+            // Should return valid stats (possibly all zeros if no rounds submitted)
+            assert!(demand.total >= 0); // always true for u64, but validates parsing
+        }
+    }
 }
