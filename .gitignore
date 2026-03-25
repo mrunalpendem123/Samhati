@@ -6,3 +6,5 @@ Cargo.lock
 programs/target/
 app-frontend/node_modules/
 app-frontend/dist/
+llama-toploc/llama.cpp/
+llama-toploc/bin/
