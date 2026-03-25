@@ -5,6 +5,7 @@ pub mod identity;
 mod model_download;
 pub mod network;
 pub mod registry;
+pub mod settlement;
 mod node_runner;
 mod swarm;
 mod tabs;
@@ -78,7 +79,7 @@ fn main() -> Result<()> {
     let downloader = ModelDownloader::new();
     let mut node_runner = NodeRunner::new();
     let mut multi_runner = MultiNodeRunner::new();
-    let swarm = Arc::new(SwarmOrchestrator::new());
+    let swarm = Arc::new(SwarmOrchestrator::new(identity_secret.unwrap_or([0u8; 32])));
 
     // Start P2P network — auto-discover other Samhati nodes
     let mut net_handle: Option<NetworkHandle> = None;
@@ -640,6 +641,13 @@ fn check_swarm(
                     app.inferences_served += 1;
                     app.demand = swarm::DemandStats::load();
                     app.demand_updated = true;
+
+                    // Settle round: save to pending + record on-chain later
+                    let round_id = settlement::next_round_id();
+                    let payload = settlement::build_payload(&result, round_id);
+                    if let Err(e) = settlement::save_pending(&payload) {
+                        eprintln!("[settlement] Failed to save round: {}", e);
+                    }
 
                     // Update swarm node display
                     for (id, new_elo) in &result.elo_updates {

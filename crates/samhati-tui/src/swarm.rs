@@ -27,7 +27,8 @@ pub struct SwarmRoundResult {
     pub rankings: Vec<PairwiseResult>,
     pub difficulty: String,
     pub used_debate: bool,
-    pub domain: String, // "Code", "Math", "Reasoning", "General"
+    pub domain: String,
+    pub proof_hashes: Vec<[u8; 32]>,
 }
 
 /// Domain demand stats — tracks what queries the network is getting.
@@ -83,6 +84,8 @@ pub struct NodeAnswer {
     pub answer: String,
     pub latency_ms: u64,
     pub model: String,
+    /// BLAKE3 hash of the TOPLOC proof (or answer text if no logprobs available).
+    pub proof_hash: [u8; 32],
 }
 
 /// Result of one pairwise comparison by a ranking node.
@@ -107,18 +110,20 @@ pub struct PairwiseResult {
 pub struct SwarmOrchestrator {
     nodes: Arc<Mutex<Vec<SwarmNode>>>,
     client: reqwest::Client,
+    signing_key: [u8; 32],
 }
 
 const ELO_FILE: &str = ".samhati/elo.json";
 
 impl SwarmOrchestrator {
-    pub fn new() -> Self {
+    pub fn new(signing_key: [u8; 32]) -> Self {
         Self {
             nodes: Arc::new(Mutex::new(Vec::new())),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_default(),
+            signing_key,
         }
     }
 
@@ -187,6 +192,7 @@ impl SwarmOrchestrator {
         selected.truncate(n_to_use);
 
         // ── Phase 1: Fan out — send prompt to selected nodes in parallel ──
+        // Each node returns answer + TOPLOC proof hash
         let mut handles = Vec::new();
         for node in &selected {
             let client = self.client.clone();
@@ -194,10 +200,11 @@ impl SwarmOrchestrator {
             let node_id = node.id.clone();
             let model = node.model.clone();
             let prompt_owned = prompt.to_string();
+            let sk = self.signing_key;
 
             handles.push(tokio::spawn(async move {
                 let node_start = Instant::now();
-                let result = call_node(&client, &url, &prompt_owned).await;
+                let result = call_node_with_proof(&client, &url, &prompt_owned, &sk, &model).await;
                 let latency = node_start.elapsed().as_millis() as u64;
                 (node_id, model, result, latency)
             }));
@@ -206,12 +213,13 @@ impl SwarmOrchestrator {
         let mut answers: Vec<NodeAnswer> = Vec::new();
         for handle in handles {
             match handle.await {
-                Ok((node_id, model, Ok(answer), latency)) => {
+                Ok((node_id, model, Ok((answer, proof_hash)), latency)) => {
                     answers.push(NodeAnswer {
                         node_id,
                         answer,
                         latency_ms: latency,
                         model,
+                        proof_hash,
                     });
                 }
                 Ok((node_id, _, Err(e), _)) => {
@@ -240,10 +248,12 @@ impl SwarmOrchestrator {
         demand.record(&domain);
 
         if answers.len() == 1 {
-            let winner = &answers[0];
+            let winner_id = answers[0].node_id.clone();
+            let winning_answer = answers[0].answer.clone();
+            let ph = vec![answers[0].proof_hash];
             return Ok(SwarmRoundResult {
-                winner_id: winner.node_id.clone(),
-                winning_answer: winner.answer.clone(),
+                winner_id,
+                winning_answer,
                 confidence: 1.0,
                 all_answers: answers,
                 elo_updates: vec![],
@@ -253,6 +263,7 @@ impl SwarmOrchestrator {
                 difficulty: difficulty_str,
                 used_debate: false,
                 domain: domain.clone(),
+                proof_hashes: ph,
             });
         }
 
@@ -292,9 +303,12 @@ impl SwarmOrchestrator {
         };
 
         let final_n = answers.len();
+        let winner_id = winner.node_id.clone();
+        let winning_answer = winner.answer.clone();
+        let phs: Vec<[u8; 32]> = answers.iter().map(|a| a.proof_hash).collect();
         Ok(SwarmRoundResult {
-            winner_id: winner.node_id.clone(),
-            winning_answer: winner.answer.clone(),
+            winner_id,
+            winning_answer,
             confidence,
             all_answers: answers,
             elo_updates,
@@ -304,6 +318,7 @@ impl SwarmOrchestrator {
             difficulty: difficulty_str,
             used_debate: use_debate,
             domain: domain.clone(),
+            proof_hashes: phs,
         })
     }
 
@@ -358,11 +373,13 @@ impl SwarmOrchestrator {
         for handle in handles {
             match handle.await {
                 Ok((node_id, model, Ok(answer), latency)) => {
+                    let proof_hash = *blake3::hash(answer.as_bytes()).as_bytes();
                     improved.push(NodeAnswer {
                         node_id,
                         answer,
                         latency_ms: latency,
                         model,
+                        proof_hash,
                     });
                 }
                 Ok((node_id, model, Err(e), _)) => {
@@ -742,6 +759,128 @@ fn parse_ranking_response(content: &str) -> Result<(f64, String)> {
     Ok((preference, content.chars().take(200).collect()))
 }
 
+/// Call a node and capture logprobs for TOPLOC proof.
+/// Returns (answer_text, proof_hash).
+/// If logprobs aren't available, falls back to BLAKE3 hash of the answer.
+async fn call_node_with_proof(
+    client: &reqwest::Client,
+    base_url: &str,
+    prompt: &str,
+    signing_key: &[u8; 32],
+    model_name: &str,
+) -> Result<(String, [u8; 32])> {
+    #[derive(Serialize)]
+    struct Req {
+        model: String,
+        messages: Vec<Msg>,
+        max_tokens: u32,
+        temperature: f32,
+        logprobs: bool,
+        top_logprobs: u8,
+    }
+    #[derive(Serialize)]
+    struct Msg {
+        role: String,
+        content: String,
+    }
+
+    let req = Req {
+        model: "default".into(),
+        messages: vec![Msg {
+            role: "user".into(),
+            content: prompt.into(),
+        }],
+        max_tokens: 1024,
+        temperature: 0.7,
+        logprobs: true,
+        top_logprobs: 8,
+    };
+
+    let resp: serde_json::Value = client
+        .post(format!(
+            "{}/v1/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
+        .json(&req)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let content = resp["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    if content.is_empty() {
+        return Err(anyhow::anyhow!("Empty response from node"));
+    }
+
+    // Try to extract logprobs and build a TOPLOC proof
+    let proof_hash = if let Some(logprobs_content) = resp["choices"][0]["logprobs"]["content"].as_array() {
+        // Build TOPLOC proof from real logprobs
+        let mut prover = samhati_toploc::prover::ToplocProver::new(model_name, *signing_key);
+
+        for token_entry in logprobs_content {
+            if let Some(top_logprobs) = token_entry["top_logprobs"].as_array() {
+                let logits: Vec<(u32, f32)> = top_logprobs
+                    .iter()
+                    .filter_map(|lp| {
+                        let token_str = lp["token"].as_str()?;
+                        let logprob = lp["logprob"].as_f64()? as f32;
+                        // Use CRC32 of token string as token_id (deterministic)
+                        let token_id = crc32_hash(token_str.as_bytes());
+                        Some((token_id, logprob))
+                    })
+                    .collect();
+
+                if !logits.is_empty() {
+                    let token_logits = samhati_toploc::proof::TokenLogits {
+                        token_id: logits[0].0, // top logit's token is the generated token
+                        top_k: logits,
+                    };
+                    prover.record_token(token_logits);
+                }
+            }
+        }
+
+        match prover.finalize() {
+            Ok(proof) => {
+                let hash = blake3::hash(&proof.to_bytes());
+                *hash.as_bytes()
+            }
+            Err(_) => {
+                // Not enough tokens for a full chunk — fall back to answer hash
+                let hash = blake3::hash(content.as_bytes());
+                *hash.as_bytes()
+            }
+        }
+    } else {
+        // No logprobs available — fall back to BLAKE3 hash of answer text
+        let hash = blake3::hash(content.as_bytes());
+        *hash.as_bytes()
+    };
+
+    Ok((content, proof_hash))
+}
+
+/// Simple CRC32 for deterministic token_id from token string.
+fn crc32_hash(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 == 1 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
 /// Call a single node's OpenAI-compatible chat endpoint for inference.
 async fn call_node(client: &reqwest::Client, base_url: &str, prompt: &str) -> Result<String> {
     #[derive(Serialize)]
@@ -1093,12 +1232,14 @@ mod tests {
                 answer: "ans a".into(),
                 latency_ms: 100,
                 model: "m".into(),
+                proof_hash: [0u8; 32],
             },
             NodeAnswer {
                 node_id: "b".into(),
                 answer: "ans b".into(),
                 latency_ms: 100,
                 model: "m".into(),
+                proof_hash: [0u8; 32],
             },
         ];
         let updates = update_elo(&mut nodes, &answers, 0);
