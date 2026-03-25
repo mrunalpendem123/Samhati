@@ -25,8 +25,56 @@ pub struct SwarmRoundResult {
     pub n_nodes: usize,
     pub total_time_ms: u64,
     pub rankings: Vec<PairwiseResult>,
-    pub difficulty: String, // "Easy", "Medium", "Hard"
+    pub difficulty: String,
     pub used_debate: bool,
+    pub domain: String, // "Code", "Math", "Reasoning", "General"
+}
+
+/// Domain demand stats — tracks what queries the network is getting.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DemandStats {
+    pub code: u64,
+    pub math: u64,
+    pub reasoning: u64,
+    pub general: u64,
+    pub total: u64,
+}
+
+impl DemandStats {
+    pub fn code_pct(&self) -> f64 { if self.total == 0 { 0.0 } else { self.code as f64 / self.total as f64 * 100.0 } }
+    pub fn math_pct(&self) -> f64 { if self.total == 0 { 0.0 } else { self.math as f64 / self.total as f64 * 100.0 } }
+    pub fn reasoning_pct(&self) -> f64 { if self.total == 0 { 0.0 } else { self.reasoning as f64 / self.total as f64 * 100.0 } }
+    pub fn general_pct(&self) -> f64 { if self.total == 0 { 0.0 } else { self.general as f64 / self.total as f64 * 100.0 } }
+
+    fn record(&mut self, domain: &str) {
+        self.total += 1;
+        match domain {
+            "Code" => self.code += 1,
+            "Math" => self.math += 1,
+            "Reasoning" => self.reasoning += 1,
+            _ => self.general += 1,
+        }
+        self.save();
+    }
+
+    fn save(&self) {
+        let path = dirs::home_dir().unwrap_or_default().join(".samhati/demand.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            std::fs::write(path, json).ok();
+        }
+    }
+
+    pub fn load() -> Self {
+        let path = dirs::home_dir().unwrap_or_default().join(".samhati/demand.json");
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +234,11 @@ impl SwarmOrchestrator {
             Difficulty::Hard => "Hard",
         }.to_string();
 
+        // Classify domain and record demand
+        let domain = classify_domain(prompt);
+        let mut demand = DemandStats::load();
+        demand.record(&domain);
+
         if answers.len() == 1 {
             let winner = &answers[0];
             return Ok(SwarmRoundResult {
@@ -199,6 +252,7 @@ impl SwarmOrchestrator {
                 rankings: vec![],
                 difficulty: difficulty_str,
                 used_debate: false,
+                domain: domain.clone(),
             });
         }
 
@@ -249,6 +303,7 @@ impl SwarmOrchestrator {
             rankings,
             difficulty: difficulty_str,
             used_debate: use_debate,
+            domain: domain.clone(),
         })
     }
 
@@ -468,6 +523,61 @@ fn classify_difficulty(prompt: &str) -> Difficulty {
         s if s >= 5 => Difficulty::Hard,
         s if s >= 2 => Difficulty::Medium,
         _ => Difficulty::Easy,
+    }
+}
+
+/// Classify the domain of a query. Used for demand tracking and
+/// routing to specialist models.
+fn classify_domain(prompt: &str) -> String {
+    let lower = prompt.to_lowercase();
+
+    // Code signals
+    let code_signals = [
+        "```", "fn ", "def ", "class ", "import ", "function ",
+        "compile", "runtime", "error:", "syntax", "variable",
+        "rust", "python", "javascript", "typescript", "java ", "golang",
+        "react", "api", "endpoint", "database", "sql",
+        "git", "docker", "kubernetes", "deploy",
+        "write a program", "write code", "code",
+        "bug", "debug", "fix this",
+    ];
+    let code_score: i32 = code_signals.iter()
+        .filter(|s| lower.contains(*s))
+        .count() as i32;
+
+    // Math signals
+    let math_signals = [
+        "solve", "equation", "calculate", "compute",
+        "prove", "theorem", "formula", "integral",
+        "derivative", "matrix", "vector", "algebra",
+        "geometry", "probability", "statistics",
+        "∫", "∑", "∂", "π", "√",
+        "math", "number", "prime",
+    ];
+    let math_score: i32 = math_signals.iter()
+        .filter(|s| lower.contains(*s))
+        .count() as i32;
+
+    // Reasoning signals
+    let reasoning_signals = [
+        "explain why", "reason", "logic", "argument",
+        "analyze", "evaluate", "compare", "contrast",
+        "what if", "hypothetical", "thought experiment",
+        "step by step", "chain of thought",
+        "pros and cons", "trade-off",
+    ];
+    let reasoning_score: i32 = reasoning_signals.iter()
+        .filter(|s| lower.contains(*s))
+        .count() as i32;
+
+    if code_score >= 2 || (code_score >= 1 && math_score == 0 && reasoning_score == 0) {
+        "Code".into()
+    } else if math_score >= 2 || (math_score >= 1 && code_score == 0) {
+        "Math".into()
+    } else if reasoning_score >= 2 {
+        "Reasoning".into()
+    } else {
+        "General".into()
     }
 }
 

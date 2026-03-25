@@ -614,6 +614,7 @@ fn check_swarm(
                     }
 
                     app.inferences_served += 1;
+                    app.demand = swarm::DemandStats::load(); // refresh from disk
 
                     // Update swarm node display
                     for (id, new_elo) in &result.elo_updates {

@@ -6,36 +6,22 @@ use crate::ui::{BG, DIM_PURPLE, PURPLE, SURFACE};
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let has_swarm = !app.swarm_nodes.is_empty();
-    let layout = if has_swarm {
-        Layout::vertical([
-            Constraint::Length(7),  // ELO hero + sparkline
-            Constraint::Length(9),  // stats grid
-            Constraint::Min(1),     // swarm nodes + node info
-        ])
-        .split(area)
-    } else {
-        Layout::vertical([
-            Constraint::Length(7),
-            Constraint::Length(9),
-            Constraint::Min(1),
-        ])
-        .split(area)
-    };
+    let layout = Layout::vertical([
+        Constraint::Length(7),   // ELO hero + sparkline
+        Constraint::Length(9),   // stats grid
+        Constraint::Length(6),   // domain demand
+        Constraint::Min(1),      // swarm nodes or node info
+    ])
+    .split(area);
 
     draw_elo_section(frame, app, layout[0]);
     draw_stats(frame, app, layout[1]);
+    draw_demand(frame, app, layout[2]);
 
     if has_swarm {
-        let bottom = Layout::vertical([
-            Constraint::Min(1),    // swarm table
-            Constraint::Length(6), // node info
-        ])
-        .split(layout[2]);
-
-        draw_swarm_nodes(frame, app, bottom[0]);
-        draw_node_info(frame, app, bottom[1]);
+        draw_swarm_nodes(frame, app, layout[3]);
     } else {
-        draw_node_info(frame, app, layout[2]);
+        draw_node_info(frame, app, layout[3]);
     }
 }
 
@@ -141,6 +127,64 @@ fn render_stat(frame: &mut Frame, label: &str, value: &str, color: Color, area: 
     ];
     let p = Paragraph::new(text).alignment(Alignment::Center);
     frame.render_widget(p, area);
+}
+
+fn draw_demand(frame: &mut Frame, app: &App, area: Rect) {
+    let d = &app.demand;
+    let bar_width = 20usize;
+
+    let make_bar = |pct: f64| -> String {
+        let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+    };
+
+    let tip = if d.total == 0 {
+        "  No queries yet — start chatting to generate demand data".into()
+    } else {
+        let best = if d.code_pct() >= d.math_pct() && d.code_pct() >= d.reasoning_pct() {
+            "Code"
+        } else if d.math_pct() >= d.reasoning_pct() {
+            "Math"
+        } else {
+            "Reasoning"
+        };
+        format!("  Run a {} model for highest demand + 1.5x SMTI bonus", best)
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("  Code      ", Style::default().fg(Color::Cyan)),
+            Span::styled(make_bar(d.code_pct()), Style::default().fg(Color::Cyan)),
+            Span::styled(format!(" {:.0}%", d.code_pct()), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Math      ", Style::default().fg(Color::Yellow)),
+            Span::styled(make_bar(d.math_pct()), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {:.0}%", d.math_pct()), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Reasoning ", Style::default().fg(Color::Magenta)),
+            Span::styled(make_bar(d.reasoning_pct()), Style::default().fg(Color::Magenta)),
+            Span::styled(format!(" {:.0}%", d.reasoning_pct()), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  General   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(make_bar(d.general_pct()), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!(" {:.0}%", d.general_pct()), Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            format!(" Network Demand ({} queries) ", d.total),
+            Style::default().fg(PURPLE).bold(),
+        ))
+        .border_style(Style::default().fg(DIM_PURPLE))
+        .style(Style::default().bg(BG));
+
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, area);
 }
 
 fn draw_swarm_nodes(frame: &mut Frame, app: &App, area: Rect) {
