@@ -1,4 +1,5 @@
 use chrono::Local;
+#[cfg(not(target_arch = "wasm32"))]
 use sysinfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,9 +239,14 @@ impl App {
 /// Follows the whitepaper's cascade: smaller models for low-end devices,
 /// specialist models get domain bonuses (1.5x SMTI).
 fn detect_models() -> Vec<ModelInfo> {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let total_ram_gb = sys.total_memory() as f64 / 1_073_741_824.0;
+    #[cfg(not(target_arch = "wasm32"))]
+    let total_ram_gb = {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        sys.total_memory() as f64 / 1_073_741_824.0
+    };
+    #[cfg(target_arch = "wasm32")]
+    let total_ram_gb = 8.0; // Assume 8 GB for browser clients
 
     let mut models = vec![
         // ── Tiny — runs on anything ─────────────────────────────────

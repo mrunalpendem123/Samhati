@@ -1,4 +1,6 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(not(target_arch = "wasm32"))]
+use crossterm::event::{self, Event};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, ChatMessage, Tab};
 use chrono::Local;
@@ -249,6 +251,7 @@ fn handle_settings_editing(app: &mut App, key: KeyEvent) -> Option<ChatAction> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn poll_event(tick_rate: std::time::Duration) -> anyhow::Result<Option<Event>> {
     if event::poll(tick_rate)? {
         Ok(Some(event::read()?))

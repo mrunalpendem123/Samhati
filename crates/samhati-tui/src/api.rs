@@ -61,12 +61,13 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: &str) -> Self {
+        let builder = reqwest::Client::builder();
+        // Timeout is not supported on WASM targets
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.timeout(std::time::Duration::from_secs(60));
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+            client: builder.build().unwrap_or_default(),
         }
     }
 

@@ -2,13 +2,23 @@
 name = "samhati-tui"
 version = "0.1.0"
 edition = "2021"
+default-run = "samhati"
 
 [[bin]]
 name = "samhati"
 path = "src/main.rs"
 
+[[bin]]
+name = "samhati-web"
+path = "src/web_main.rs"
+required-features = ["web"]
+
+[features]
+default = []
+web = ["ratzilla", "wasm-bindgen-futures"]
+
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -30,3 +40,9 @@ blake3 = "1"
 iroh = "0.96"
 iroh-gossip = "0.96"
 tracing = "0.1"
+ratzilla = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# reqwest WASM needs these features
+getrandom = { version = "0.2", features = ["js"] }
