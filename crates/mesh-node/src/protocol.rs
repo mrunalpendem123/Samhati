@@ -86,21 +86,68 @@ pub struct PongMessage {
     pub nonce: String,
 }
 
+/// Maximum gossip message size (64 KB). Prevents OOM from maliciously large payloads.
+const MAX_GOSSIP_MSG_BYTES: usize = 64 * 1024;
+
 pub fn parse_capability(body: &str) -> Option<CapabilityPayload> {
+    if body.len() > MAX_GOSSIP_MSG_BYTES { return None; }
     serde_json::from_str(body).ok()
 }
 
 pub fn parse_models(body: &str) -> Option<ModelsAnnouncement> {
+    if body.len() > MAX_GOSSIP_MSG_BYTES { return None; }
     serde_json::from_str(body).ok()
 }
 
 pub fn parse_ping(body: &str) -> Option<PingMessage> {
+    if body.len() > MAX_GOSSIP_MSG_BYTES { return None; }
     serde_json::from_str(body).ok()
 }
 
 pub fn parse_pong(body: &str) -> Option<PongMessage> {
+    if body.len() > MAX_GOSSIP_MSG_BYTES { return None; }
     serde_json::from_str(body).ok()
 }
 
 // RPC ALPN constant lives in inference-coordinator to avoid a circular dependency.
 pub use inference_coordinator::rpc::INFERENCE_ALPN;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_capability_rejects_oversized_message() {
+        let huge = "x".repeat(MAX_GOSSIP_MSG_BYTES + 1);
+        assert!(parse_capability(&huge).is_none());
+    }
+
+    #[test]
+    fn parse_models_rejects_oversized_message() {
+        let huge = "x".repeat(MAX_GOSSIP_MSG_BYTES + 1);
+        assert!(parse_models(&huge).is_none());
+    }
+
+    #[test]
+    fn parse_ping_rejects_oversized_message() {
+        let huge = "x".repeat(MAX_GOSSIP_MSG_BYTES + 1);
+        assert!(parse_ping(&huge).is_none());
+    }
+
+    #[test]
+    fn parse_capability_accepts_valid_json() {
+        let json = r#"{"node_id":"abc","free_vram_gb":8.0,"bandwidth_mbps":100.0,"reliability":0.99,"gpu_capacity_score":1.0,"rtt_ms":10.0,"kv_bits":8,"context":2048,"quant_bits":4,"role":"Inference"}"#;
+        assert!(parse_capability(json).is_some());
+    }
+
+    #[test]
+    fn parse_capability_returns_none_for_invalid_json() {
+        assert!(parse_capability("not json").is_none());
+    }
+
+    #[test]
+    fn parse_ping_accepts_valid_json() {
+        let json = r#"{"from_id":"a","target_id":"b","nonce":"123"}"#;
+        assert!(parse_ping(json).is_some());
+    }
+}

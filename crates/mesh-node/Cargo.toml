@@ -31,6 +31,7 @@ async-trait  = "0.1"
 futures-util = "0.3"
 memmap2      = "0.9"
 safetensors  = "0.4"
+subtle       = "2"
 
 [features]
 burn = ["inference-coordinator/burn"]

@@ -216,7 +216,7 @@ fn escape_for_split(value: &str) -> String {
             '\n' | '\r' => ' ',
             other => other,
         };
-        if ch.is_whitespace() || ch == '\\' || ch == '"' {
+        if ch.is_whitespace() || ch == '\\' || ch == '"' || ch == '\'' {
             out.push('\\');
         }
         out.push(ch);
@@ -274,4 +274,93 @@ fn split_shell_words(input: &str) -> Result<Vec<String>> {
         out.push(cur);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_for_split_handles_single_quotes() {
+        let escaped = escape_for_split("it's a test");
+        // Single quote should be escaped with backslash
+        assert!(escaped.contains("\\'"));
+        // After splitting, escaped whitespace keeps it as one arg
+        let args = split_shell_words(&escaped).unwrap();
+        assert_eq!(args, vec!["it's a test"]);
+    }
+
+    #[test]
+    fn escape_for_split_handles_double_quotes() {
+        let escaped = escape_for_split(r#"say "hello""#);
+        assert!(escaped.contains("\\\""));
+        // Escaped whitespace and quotes produce a single arg
+        let args = split_shell_words(&escaped).unwrap();
+        assert_eq!(args, vec!["say \"hello\""]);
+    }
+
+    #[test]
+    fn escape_for_split_handles_whitespace() {
+        let escaped = escape_for_split("hello world");
+        // Whitespace is escaped, so it stays as one arg
+        let args = split_shell_words(&escaped).unwrap();
+        assert_eq!(args, vec!["hello world"]);
+    }
+
+    #[test]
+    fn escape_for_split_handles_newlines() {
+        let escaped = escape_for_split("line1\nline2");
+        // Newlines replaced with spaces, then escaped
+        assert!(!escaped.contains('\n'));
+        let args = split_shell_words(&escaped).unwrap();
+        assert_eq!(args, vec!["line1 line2"]);
+    }
+
+    #[test]
+    fn escape_for_split_handles_backslashes() {
+        let escaped = escape_for_split(r"path\to\file");
+        assert!(escaped.contains("\\\\"));
+    }
+
+    #[test]
+    fn split_shell_words_basic() {
+        let args = split_shell_words("--model path/to/model --prompt hello").unwrap();
+        assert_eq!(args, vec!["--model", "path/to/model", "--prompt", "hello"]);
+    }
+
+    #[test]
+    fn split_shell_words_quoted() {
+        let args = split_shell_words(r#"--prompt "hello world""#).unwrap();
+        assert_eq!(args, vec!["--prompt", "hello world"]);
+    }
+
+    #[test]
+    fn split_shell_words_single_quoted() {
+        let args = split_shell_words("--prompt 'hello world'").unwrap();
+        assert_eq!(args, vec!["--prompt", "hello world"]);
+    }
+
+    #[test]
+    fn split_shell_words_unterminated_quote_fails() {
+        assert!(split_shell_words("--prompt \"hello").is_err());
+    }
+
+    #[test]
+    fn apply_template_escapes_prompt() {
+        let result = apply_template(
+            "--model {model} --prompt {prompt} --max-tokens {max_tokens}",
+            "llama",
+            "it's a ; test",
+            128,
+            0.7,
+            2048,
+        );
+        // Prompt should be escaped — single quotes and semicolons should be safe
+        let args = split_shell_words(&result).unwrap();
+        assert_eq!(args[0], "--model");
+        assert_eq!(args[1], "llama");
+        assert_eq!(args[2], "--prompt");
+        // The prompt words should be separate args (whitespace-separated) but safe
+        assert!(args.len() >= 4);
+    }
 }

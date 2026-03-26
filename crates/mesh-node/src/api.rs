@@ -64,7 +64,7 @@ pub struct ApiState {
     pub local_exec: Option<LocalExecConfig>,
     pub api_auth: Option<String>,
     pub allow_models: Option<HashSet<String>>,
-    rate_limiter: Option<Arc<Mutex<RateLimiter>>>,
+    rate_limiter: Option<Arc<Mutex<PerClientRateLimiter>>>,
     pub swarm: Option<Arc<SwarmHandle>>,
     pub swarm_ranked: Option<Arc<SwarmRankedHandle>>,
 }
@@ -81,7 +81,7 @@ pub async fn serve(config: ApiConfig) -> Result<()> {
         } else {
             Some(config.allow_models.into_iter().collect())
         },
-        rate_limiter: build_rate_limiter(config.rate_limit_rps, config.rate_limit_burst),
+        rate_limiter: build_per_client_rate_limiter(config.rate_limit_rps, config.rate_limit_burst),
         swarm: config.swarm,
         swarm_ranked: config.swarm_ranked,
     };
@@ -93,7 +93,7 @@ pub async fn serve(config: ApiConfig) -> Result<()> {
         .with_state(Arc::new(state));
 
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
 
@@ -178,13 +178,16 @@ struct ChatChoice {
 
 async fn chat_completions(
     State(state): State<Arc<ApiState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> axum::response::Response {
     if let Err(resp) = check_auth(&state, &headers).await {
         return resp;
     }
-    if let Err(resp) = check_rate_limit(&state).await {
+    // Use actual TCP peer address for rate limiting — not the spoofable X-Forwarded-For header.
+    let client_id = addr.ip().to_string();
+    if let Err(resp) = check_rate_limit(&state, &client_id).await {
         return resp;
     }
     if state.infer_base.is_none() && state.local_exec.is_none() && state.swarm.is_none() && state.swarm_ranked.is_none() {
@@ -455,8 +458,13 @@ async fn check_auth(state: &ApiState, headers: &HeaderMap) -> Result<(), axum::r
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let bearer_ok = auth.strip_prefix("Bearer ").map(|v| v == required).unwrap_or(false);
-    let key_ok = api_key == required;
+    use subtle::ConstantTimeEq;
+    let bearer_ok = auth.strip_prefix("Bearer ").map(|v| {
+        v.as_bytes().len() == required.as_bytes().len()
+            && v.as_bytes().ct_eq(required.as_bytes()).into()
+    }).unwrap_or(false);
+    let key_ok = api_key.as_bytes().len() == required.as_bytes().len()
+        && api_key.as_bytes().ct_eq(required.as_bytes()).into();
 
     if bearer_ok || key_ok {
         Ok(())
@@ -471,13 +479,13 @@ async fn check_auth(state: &ApiState, headers: &HeaderMap) -> Result<(), axum::r
     }
 }
 
-async fn check_rate_limit(state: &ApiState) -> Result<(), axum::response::Response> {
+async fn check_rate_limit(state: &ApiState, client_id: &str) -> Result<(), axum::response::Response> {
     let limiter = match &state.rate_limiter {
         Some(l) => l,
         None => return Ok(()),
     };
     let mut guard = limiter.lock().await;
-    if guard.allow() {
+    if guard.allow(client_id) {
         Ok(())
     } else {
         let body = json!({
@@ -490,13 +498,43 @@ async fn check_rate_limit(state: &ApiState) -> Result<(), axum::response::Respon
     }
 }
 
-fn build_rate_limiter(rps: Option<f64>, burst: Option<u32>) -> Option<Arc<Mutex<RateLimiter>>> {
+fn build_per_client_rate_limiter(rps: Option<f64>, burst: Option<u32>) -> Option<Arc<Mutex<PerClientRateLimiter>>> {
     let rps = rps?;
     if rps <= 0.0 {
         return None;
     }
     let burst = burst.unwrap_or_else(|| rps.ceil() as u32).max(1);
-    Some(Arc::new(Mutex::new(RateLimiter::new(rps, burst))))
+    Some(Arc::new(Mutex::new(PerClientRateLimiter::new(rps, burst))))
+}
+
+/// Per-client rate limiter using individual token buckets.
+#[derive(Debug)]
+struct PerClientRateLimiter {
+    rps: f64,
+    burst: u32,
+    clients: std::collections::HashMap<String, RateLimiter>,
+}
+
+impl PerClientRateLimiter {
+    fn new(rps: f64, burst: u32) -> Self {
+        Self {
+            rps,
+            burst,
+            clients: std::collections::HashMap::new(),
+        }
+    }
+
+    fn allow(&mut self, client_id: &str) -> bool {
+        // Evict stale entries periodically (>10 min idle)
+        if self.clients.len() > 1000 {
+            let cutoff = Instant::now() - std::time::Duration::from_secs(600);
+            self.clients.retain(|_, rl| rl.last_refill > cutoff);
+        }
+        let limiter = self.clients.entry(client_id.to_string()).or_insert_with(|| {
+            RateLimiter::new(self.rps, self.burst)
+        });
+        limiter.allow()
+    }
 }
 
 #[derive(Debug)]
