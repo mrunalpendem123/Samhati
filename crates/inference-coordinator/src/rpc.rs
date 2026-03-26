@@ -1,9 +1,21 @@
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::tensor_frame::TensorFrame;
 
 /// ALPN identifier for the mesh inference QUIC protocol.
 pub const INFERENCE_ALPN: &[u8] = b"mesh-inference/2";
+
+/// Maximum allowed size for a single bincode-deserialized message (256 MB).
+/// Prevents OOM from maliciously crafted Vec length fields.
+const MAX_MESSAGE_SIZE: u64 = 256 * 1024 * 1024;
+
+fn bincode_options() -> impl bincode::Options {
+    bincode::DefaultOptions::new()
+        .with_limit(MAX_MESSAGE_SIZE)
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+}
 
 pub type SessionId = String;
 
@@ -42,7 +54,7 @@ impl RpcRequest {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
     }
 }
 
@@ -51,7 +63,7 @@ impl RpcResponse {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
     }
 }
 
@@ -90,7 +102,7 @@ impl ReplayRequest {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
     }
 }
 
@@ -99,7 +111,7 @@ impl ReplayResponse {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
     }
 }
 
@@ -156,7 +168,7 @@ impl LegacyRpcRequest {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
     }
 }
 
@@ -165,6 +177,49 @@ impl LegacyRpcResponse {
         Ok(bincode::serialize(self)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
+        Ok(bincode_options().deserialize(bytes)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor_frame::TensorFrame;
+
+    #[test]
+    fn rpc_request_roundtrip() {
+        let req = RpcRequest {
+            session_id: "test-session".to_string(),
+            layer_start: 0,
+            layer_end: 16,
+            total_layers: 32,
+            max_tokens: 128,
+            temperature: 0.7,
+            tensor: TensorFrame::from_f32(&[1.0, 2.0, 3.0, 4.0], vec![1, 4], 0),
+        };
+        let bytes = req.to_bytes().unwrap();
+        let decoded = RpcRequest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.session_id, "test-session");
+        assert_eq!(decoded.layer_start, 0);
+        assert_eq!(decoded.layer_end, 16);
+    }
+
+    #[test]
+    fn rpc_response_roundtrip() {
+        let resp = RpcResponse {
+            tensor: TensorFrame::from_f32(&[42.0], vec![1, 1], 0),
+            error: None,
+        };
+        let bytes = resp.to_bytes().unwrap();
+        let decoded = RpcResponse::from_bytes(&bytes).unwrap();
+        assert!(decoded.error.is_none());
+        assert_eq!(decoded.tensor.shape, vec![1, 1]);
+    }
+
+    #[test]
+    fn bincode_rejects_crafted_oversized_payload() {
+        // A small garbage payload should fail deserialization, not panic.
+        let garbage = vec![0xFF; 32];
+        assert!(RpcRequest::from_bytes(&garbage).is_err());
     }
 }
