@@ -254,23 +254,6 @@ Samhati/
 
 ---
 
-## Samhati vs Fortytwo vs Bittensor
-
-| Property | Samhati | Fortytwo | Bittensor |
-|----------|---------|----------|-----------|
-| Chain | **Solana** (live) | Monad (pre-mainnet) | Substrate |
-| Reward signal | **ELO** (quality) | Reputation (opaque) | Stake (capital) |
-| Proof of compute | **TOPLOC** (activation-level) | Capability tests | None |
-| P2P transport | **iroh QUIC** (open) | Undisclosed | Custom |
-| Inference | Swarm + debate + BradleyTerry | Swarm + BradleyTerry | Subnet competition |
-| Node discovery | **Solana registry + iroh gossip** | Closed source | Custom DHT |
-| User cost | **Free** | API pricing + tokens to join | Subnet fees |
-| Adaptive routing | **Yes** (Easy/Medium/Hard) | No (all queries → 35 nodes) | No |
-| Debate round | **Yes** (hard queries) | No | No |
-| Domain demand tracking | **On-chain** (Solana) | Unknown | No |
-
----
-
 ## Roadmap
 
 ### Done ✅
