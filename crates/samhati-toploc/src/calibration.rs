@@ -219,7 +219,7 @@ mod tests {
 
     fn setup_verifier(model_id: &str, key_bytes: [u8; 32]) -> ToplocVerifierImpl {
         let signing_key = SigningKey::from_bytes(&key_bytes);
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
         verifier.register_model(model_id);
         verifier.register_public_key(signing_key.verifying_key());
         verifier

@@ -112,7 +112,11 @@ pub struct ToplocProof {
     pub chunk_proofs: Vec<LogitChunkProof>,
     /// Unix timestamp (seconds since epoch).
     pub timestamp: u64,
-    /// Ed25519 signature over (model_hash || token_count || chunk hashes || timestamp).
+    /// 32-byte Ed25519 public key of the node that produced this proof.
+    /// Binds the proof to a specific node identity for verification.
+    #[serde(default)]
+    pub node_pubkey: [u8; 32],
+    /// Ed25519 signature over (model_hash || token_count || chunk hashes || timestamp || node_pubkey).
     #[serde(with = "serde_sig")]
     pub node_signature: [u8; 64],
 }
@@ -149,6 +153,7 @@ impl ToplocProof {
             msg.extend_from_slice(&chunk.hash);
         }
         msg.extend_from_slice(&self.timestamp.to_be_bytes());
+        msg.extend_from_slice(&self.node_pubkey);
         msg
     }
 }
@@ -191,6 +196,7 @@ mod tests {
                 LogitChunkProof { chunk_index: 1, hash: [3u8; 32] },
             ],
             timestamp: 1700000000,
+            node_pubkey: [5u8; 32],
             node_signature: [4u8; 64],
         };
         let bytes = proof.to_bytes();
@@ -199,6 +205,7 @@ mod tests {
         assert_eq!(decoded.token_count, proof.token_count);
         assert_eq!(decoded.chunk_proofs.len(), 2);
         assert_eq!(decoded.timestamp, proof.timestamp);
+        assert_eq!(decoded.node_pubkey, proof.node_pubkey);
         assert_eq!(decoded.node_signature, proof.node_signature);
     }
 
@@ -209,6 +216,7 @@ mod tests {
             token_count: 32,
             chunk_proofs: vec![LogitChunkProof { chunk_index: 0, hash: [9u8; 32] }],
             timestamp: 1700000000,
+            node_pubkey: [0u8; 32],
             node_signature: [0u8; 64],
         };
         let h1 = proof.proof_hash();

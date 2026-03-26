@@ -19,12 +19,22 @@ pub enum VerificationResult {
         got: u32,
     },
     InvalidSignature,
+    /// No public keys have been registered — cannot verify signatures.
+    NoKeysRegistered,
     MissingChunks {
         expected: usize,
         got: usize,
     },
     UnknownModel(String),
     InvalidProofStructure(String),
+    /// Proof timestamp is too far from current time.
+    StaleProof {
+        proof_ts: u64,
+        now_ts: u64,
+        max_age_secs: u64,
+    },
+    /// Proof node_pubkey does not match any registered key.
+    UnknownNode,
 }
 
 impl VerificationResult {
@@ -48,10 +58,10 @@ pub trait ToplocVerifier: Send + Sync {
 pub struct ToplocVerifierImpl {
     /// Known model hashes: model_id -> expected BLAKE3 hash.
     known_models: HashMap<String, [u8; 32]>,
-    /// Known node public keys: for signature verification.
-    /// Maps a public key bytes to the verifying key. In production this would be
-    /// looked up by node id; here we try all known keys.
-    known_public_keys: Vec<VerifyingKey>,
+    /// Known node public keys: keyed by 32-byte pubkey for direct lookup.
+    known_public_keys: HashMap<[u8; 32], VerifyingKey>,
+    /// Maximum allowed age of a proof in seconds (0 = no freshness check).
+    max_proof_age_secs: u64,
 }
 
 impl ToplocVerifierImpl {
@@ -59,8 +69,15 @@ impl ToplocVerifierImpl {
     pub fn new() -> Self {
         Self {
             known_models: HashMap::new(),
-            known_public_keys: Vec::new(),
+            known_public_keys: HashMap::new(),
+            max_proof_age_secs: 300, // 5 minutes default
         }
+    }
+
+    /// Set the maximum allowed age of a proof (0 = disable freshness check).
+    pub fn with_max_proof_age(mut self, secs: u64) -> Self {
+        self.max_proof_age_secs = secs;
+        self
     }
 
     /// Register a model so its hash is accepted during verification.
@@ -71,28 +88,30 @@ impl ToplocVerifierImpl {
 
     /// Register a node public key for signature verification.
     pub fn register_public_key(&mut self, public_key: VerifyingKey) {
-        self.known_public_keys.push(public_key);
+        self.known_public_keys.insert(*public_key.as_bytes(), public_key);
     }
 
     /// Register a node public key from raw 32 bytes.
     pub fn register_public_key_bytes(&mut self, bytes: [u8; 32]) -> Result<(), ed25519_dalek::SignatureError> {
         let vk = VerifyingKey::from_bytes(&bytes)?;
-        self.known_public_keys.push(vk);
+        self.known_public_keys.insert(bytes, vk);
         Ok(())
     }
 
-    /// Verify the Ed25519 signature on a proof using any of the known public keys.
-    fn verify_signature(&self, proof: &ToplocProof) -> bool {
-        let msg = proof.signable_message();
-        let sig = match Signature::from_bytes(&proof.node_signature) {
-            sig => sig,
+    /// Verify the Ed25519 signature on a proof against the node's declared public key.
+    fn verify_signature(&self, proof: &ToplocProof) -> VerificationResult {
+        // Look up the specific key declared in the proof
+        let vk = match self.known_public_keys.get(&proof.node_pubkey) {
+            Some(vk) => vk,
+            None => return VerificationResult::UnknownNode,
         };
-        for vk in &self.known_public_keys {
-            if vk.verify(&msg, &sig).is_ok() {
-                return true;
-            }
+        let msg = proof.signable_message();
+        let sig = Signature::from_bytes(&proof.node_signature);
+        if vk.verify(&msg, &sig).is_ok() {
+            VerificationResult::Valid
+        } else {
+            VerificationResult::InvalidSignature
         }
-        false
     }
 }
 
@@ -109,13 +128,18 @@ impl ToplocVerifier for ToplocVerifierImpl {
         claimed_model_id: &str,
         output_token_count: u32,
     ) -> VerificationResult {
-        // 1. Check model is known
+        // 1. Reject if no public keys registered — cannot verify anything
+        if self.known_public_keys.is_empty() {
+            return VerificationResult::NoKeysRegistered;
+        }
+
+        // 2. Check model is known
         let expected_hash = match self.known_models.get(claimed_model_id) {
             Some(h) => *h,
             None => return VerificationResult::UnknownModel(claimed_model_id.to_string()),
         };
 
-        // 2. Check model hash
+        // 3. Check model hash
         if proof.model_hash != expected_hash {
             return VerificationResult::InvalidModelHash {
                 expected: expected_hash,
@@ -123,7 +147,7 @@ impl ToplocVerifier for ToplocVerifierImpl {
             };
         }
 
-        // 3. Check token count
+        // 4. Check token count
         if proof.token_count != output_token_count {
             return VerificationResult::TokenCountMismatch {
                 expected: output_token_count,
@@ -131,7 +155,7 @@ impl ToplocVerifier for ToplocVerifierImpl {
             };
         }
 
-        // 4. Check chunk count = ceil(token_count / 32)
+        // 5. Check chunk count = ceil(token_count / 32)
         let chunk_size = 32usize;
         let expected_chunks = (proof.token_count as usize + chunk_size - 1) / chunk_size;
         if proof.chunk_proofs.len() != expected_chunks {
@@ -141,7 +165,7 @@ impl ToplocVerifier for ToplocVerifierImpl {
             };
         }
 
-        // 5. Validate chunk indices are sequential
+        // 6. Validate chunk indices are sequential
         for (i, chunk) in proof.chunk_proofs.iter().enumerate() {
             if chunk.chunk_index != i as u32 {
                 return VerificationResult::InvalidProofStructure(format!(
@@ -151,9 +175,26 @@ impl ToplocVerifier for ToplocVerifierImpl {
             }
         }
 
-        // 6. Verify Ed25519 signature
-        if !self.known_public_keys.is_empty() && !self.verify_signature(proof) {
-            return VerificationResult::InvalidSignature;
+        // 7. Check proof freshness
+        if self.max_proof_age_secs > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let age = now.saturating_sub(proof.timestamp);
+            if age > self.max_proof_age_secs {
+                return VerificationResult::StaleProof {
+                    proof_ts: proof.timestamp,
+                    now_ts: now,
+                    max_age_secs: self.max_proof_age_secs,
+                };
+            }
+        }
+
+        // 8. Verify Ed25519 signature against the proof's declared node_pubkey
+        let sig_result = self.verify_signature(proof);
+        if !sig_result.is_valid() {
+            return sig_result;
         }
 
         VerificationResult::Valid
@@ -165,7 +206,7 @@ mod tests {
     use super::*;
     use crate::proof::TokenLogits;
     use crate::prover::ToplocProver;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::RngCore;
 
     fn random_key() -> [u8; 32] {
@@ -198,7 +239,7 @@ mod tests {
         let model_id = "test-model";
         let proof = make_valid_proof(model_id, key_bytes, 64);
 
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0); // disable freshness for unit test
         verifier.register_model(model_id);
         verifier.register_public_key(verifying_key);
 
@@ -214,7 +255,7 @@ mod tests {
 
         let proof = make_valid_proof("model-a", key_bytes, 32);
 
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
         verifier.register_model("model-a");
         verifier.register_model("model-b");
         verifier.register_public_key(verifying_key);
@@ -232,7 +273,7 @@ mod tests {
 
         let proof = make_valid_proof("m", key_bytes, 64);
 
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
         verifier.register_model("m");
         verifier.register_public_key(verifying_key);
 
@@ -244,9 +285,13 @@ mod tests {
     #[test]
     fn unknown_model_fails() {
         let key_bytes = random_key();
-        let proof = make_valid_proof("m", key_bytes, 32);
+        let signing_key = SigningKey::from_bytes(&key_bytes);
 
-        let verifier = ToplocVerifierImpl::new(); // no models registered
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
+        verifier.register_public_key(signing_key.verifying_key());
+        // no models registered
+
+        let proof = make_valid_proof("m", key_bytes, 32);
         let result = verifier.verify(&proof, "m", 32);
         assert!(matches!(result, VerificationResult::UnknownModel(_)));
     }
@@ -254,22 +299,36 @@ mod tests {
     #[test]
     fn invalid_signature_fails() {
         let key_bytes = random_key();
+        let signing_key = SigningKey::from_bytes(&key_bytes);
         let mut proof = make_valid_proof("m", key_bytes, 32);
 
         // Tamper with the signature
         proof.node_signature[0] ^= 0xFF;
         proof.node_signature[1] ^= 0xFF;
 
-        // Use a different key for the verifier
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
+        verifier.register_model("m");
+        verifier.register_public_key(signing_key.verifying_key());
+
+        let result = verifier.verify(&proof, "m", 32);
+        assert_eq!(result, VerificationResult::InvalidSignature);
+    }
+
+    #[test]
+    fn unknown_node_pubkey_fails() {
+        let key_bytes = random_key();
+        let proof = make_valid_proof("m", key_bytes, 32);
+
+        // Register a different key than the one that signed the proof
         let other_key = random_key();
         let other_signing = SigningKey::from_bytes(&other_key);
 
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
         verifier.register_model("m");
         verifier.register_public_key(other_signing.verifying_key());
 
         let result = verifier.verify(&proof, "m", 32);
-        assert_eq!(result, VerificationResult::InvalidSignature);
+        assert_eq!(result, VerificationResult::UnknownNode);
     }
 
     #[test]
@@ -282,7 +341,7 @@ mod tests {
         // Remove a chunk
         proof.chunk_proofs.pop();
 
-        let mut verifier = ToplocVerifierImpl::new();
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(0);
         verifier.register_model("m");
         verifier.register_public_key(verifying_key);
 
@@ -291,15 +350,41 @@ mod tests {
     }
 
     #[test]
-    fn verification_without_public_keys_skips_signature_check() {
+    fn verification_without_public_keys_rejects() {
         let key_bytes = random_key();
         let proof = make_valid_proof("m", key_bytes, 32);
 
         let mut verifier = ToplocVerifierImpl::new();
         verifier.register_model("m");
-        // No public keys registered — signature check is skipped
+        // No public keys registered — must reject
 
         let result = verifier.verify(&proof, "m", 32);
-        assert_eq!(result, VerificationResult::Valid);
+        assert_eq!(result, VerificationResult::NoKeysRegistered);
+    }
+
+    #[test]
+    fn stale_proof_rejected() {
+        let key_bytes = random_key();
+        let signing_key = SigningKey::from_bytes(&key_bytes);
+        let verifying_key = signing_key.verifying_key();
+
+        let mut proof = make_valid_proof("m", key_bytes, 32);
+        // Set timestamp to 10 minutes ago
+        proof.timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 600;
+        // Re-sign with the tampered timestamp
+        let msg = proof.signable_message();
+        let sig = signing_key.sign(&msg);
+        proof.node_signature = sig.to_bytes();
+
+        let mut verifier = ToplocVerifierImpl::new().with_max_proof_age(300);
+        verifier.register_model("m");
+        verifier.register_public_key(verifying_key);
+
+        let result = verifier.verify(&proof, "m", 32);
+        assert!(matches!(result, VerificationResult::StaleProof { .. }));
     }
 }

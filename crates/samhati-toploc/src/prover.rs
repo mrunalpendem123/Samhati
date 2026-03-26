@@ -77,11 +77,13 @@ impl ToplocProver {
             .as_secs();
 
         // Build an unsigned proof to compute the signable message
+        let node_pubkey = *self.signing_key.verifying_key().as_bytes();
         let mut proof = ToplocProof {
             model_hash: self.model_hash,
             token_count,
             chunk_proofs,
             timestamp,
+            node_pubkey,
             node_signature: [0u8; 64],
         };
 
