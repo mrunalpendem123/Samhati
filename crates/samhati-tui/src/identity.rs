@@ -34,17 +34,15 @@ impl NodeIdentity {
     /// If an existing Solana wallet exists at ~/.config/solana/id.json or
     /// the old samhati path, migrates it to the canonical location.
     pub fn load_or_create() -> Result<Self> {
-        let samhati_dir = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".samhati");
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory — HOME env var may be unset"))?;
+        let samhati_dir = home.join(".samhati");
         let identity_path = samhati_dir.join("identity.json");
 
         // Check existing locations (in priority order)
-        let solana_default = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".config/solana/id.json");
+        let solana_default = home.join(".config/solana/id.json");
         let old_samhati = dirs::data_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+            .unwrap_or_else(|| home.clone())
             .join("samhati/wallet.json");
 
         let source_path = if identity_path.exists() {
@@ -68,6 +66,14 @@ impl NodeIdentity {
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))?;
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!(
+                    "WARNING: identity file at {:?} may have overly permissive permissions. \
+                     On Windows, manually restrict access to your user account only.",
+                    identity_path
+                );
             }
             identity_path.clone()
         };

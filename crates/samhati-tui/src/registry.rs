@@ -23,8 +23,7 @@ static PDA_CACHE: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
 /// Samhati program ID on devnet.
 const PROGRAM_ID: &str = "AB7cSMLv1J7J28DKLMbzo2tyNp1kZSmE67a6Heoa5Mkr";
 
-/// Solana RPC endpoint.
-const RPC_URL: &str = "https://api.devnet.solana.com";
+use crate::wallet::solana_rpc_url as rpc_url;
 
 /// A registered node from the on-chain registry.
 #[derive(Debug, Clone)]
@@ -75,7 +74,7 @@ pub async fn fetch_all_nodes() -> Result<Vec<RegisteredNode>> {
     });
 
     let resp: RpcResponse = client
-        .post(RPC_URL)
+        .post(rpc_url())
         .json(&body)
         .send()
         .await?
@@ -121,7 +120,7 @@ pub async fn is_registered(our_pubkey: &str) -> Result<bool> {
     });
 
     let resp: serde_json::Value = client
-        .post(RPC_URL)
+        .post(rpc_url())
         .json(&body)
         .send()
         .await?
@@ -155,7 +154,7 @@ pub async fn register_node(
         "method": "getLatestBlockhash",
         "params": [{"commitment": "finalized"}]
     });
-    let bh_resp: serde_json::Value = client.post(RPC_URL).json(&bh_body).send().await?.json().await?;
+    let bh_resp: serde_json::Value = client.post(rpc_url()).json(&bh_body).send().await?.json().await?;
     let blockhash_str = bh_resp["result"]["value"]["blockhash"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Failed to get blockhash"))?;
@@ -200,7 +199,7 @@ pub async fn register_node(
         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
     });
 
-    let send_resp: serde_json::Value = client.post(RPC_URL).json(&send_body).send().await?.json().await?;
+    let send_resp: serde_json::Value = client.post(rpc_url()).json(&send_body).send().await?.json().await?;
 
     if let Some(sig) = send_resp["result"].as_str() {
         Ok(sig.to_string())
@@ -331,7 +330,7 @@ pub async fn submit_round(
         "method": "getLatestBlockhash",
         "params": [{"commitment": "finalized"}]
     });
-    let bh_resp: serde_json::Value = client.post(RPC_URL).json(&bh_body).send().await?.json().await?;
+    let bh_resp: serde_json::Value = client.post(rpc_url()).json(&bh_body).send().await?.json().await?;
     let blockhash_str = bh_resp["result"]["value"]["blockhash"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Failed to get blockhash"))?;
@@ -415,7 +414,7 @@ pub async fn submit_round(
         "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
     });
 
-    let send_resp: serde_json::Value = client.post(RPC_URL).json(&send_body).send().await?.json().await?;
+    let send_resp: serde_json::Value = client.post(rpc_url()).json(&send_body).send().await?.json().await?;
 
     if let Some(sig) = send_resp["result"].as_str() {
         Ok(sig.to_string())
@@ -433,7 +432,7 @@ pub async fn get_sol_balance(pubkey: &str) -> Result<f64> {
         "method": "getBalance",
         "params": [pubkey]
     });
-    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+    let resp: serde_json::Value = client.post(rpc_url()).json(&body).send().await?.json().await?;
     let lamports = resp["result"]["value"].as_u64().unwrap_or(0);
     Ok(lamports as f64 / 1_000_000_000.0)
 }
@@ -446,7 +445,7 @@ pub async fn request_airdrop(pubkey: &str) -> Result<String> {
         "method": "requestAirdrop",
         "params": [pubkey, 1_000_000_000u64] // 1 SOL
     });
-    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+    let resp: serde_json::Value = client.post(rpc_url()).json(&body).send().await?.json().await?;
     if let Some(sig) = resp["result"].as_str() {
         Ok(sig.to_string())
     } else {
@@ -470,7 +469,7 @@ pub async fn fetch_demand() -> Result<crate::swarm::DemandStats> {
         "params": [config_pda, {"encoding": "base64"}]
     });
 
-    let resp: serde_json::Value = client.post(RPC_URL).json(&body).send().await?.json().await?;
+    let resp: serde_json::Value = client.post(rpc_url()).json(&body).send().await?.json().await?;
 
     if resp["result"]["value"].is_null() {
         // Config not initialized yet — return zeros

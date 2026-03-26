@@ -5,6 +5,15 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 
+/// Solana RPC endpoint — configurable via SOLANA_RPC_URL env var, defaults to devnet.
+pub fn solana_rpc_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("SOLANA_RPC_URL")
+            .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string())
+    })
+}
+
 /// Solana keypair stored as JSON array of 64 bytes (same format as `solana-keygen`).
 pub struct SolanaWallet {
     pub pubkey: String,
@@ -71,7 +80,7 @@ impl SolanaWallet {
         });
 
         let resp = client
-            .post("https://api.devnet.solana.com")
+            .post(solana_rpc_url())
             .json(&body)
             .send()
             .await?
@@ -93,7 +102,7 @@ impl SolanaWallet {
         });
 
         let resp = client
-            .post("https://api.devnet.solana.com")
+            .post(solana_rpc_url())
             .json(&body)
             .send()
             .await?
@@ -142,7 +151,7 @@ impl SolanaWallet {
         });
 
         let resp = client
-            .post("https://api.devnet.solana.com")
+            .post(solana_rpc_url())
             .json(&body)
             .send()
             .await?
