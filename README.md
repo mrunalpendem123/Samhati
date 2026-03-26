@@ -16,18 +16,31 @@ The core mechanism is **swarm intelligence**: queries fan out to N independent n
 proof. The same N nodes peer-rank each other's answers. **BradleyTerry** aggregation selects the
 winner — achieving **85.90% on GPQA Diamond** vs 68.69% for majority voting.
 
-> Built on **Solana** · Powered by **TOPLOC** · Inspired by **Fortytwo**
+> Built on **Solana** · Powered by **TOPLOC**
 
 ---
 
 ## Quick Start
 
+### Terminal (native)
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/mrunalpendem123/Samhati/main/install.sh | bash
-cd ~/Samhati && cargo run -p samhati-tui
+cd ~/Samhati && cargo run -p samhati-tui --bin samhati
 ```
 
-That's it. The install script builds everything including the TOPLOC-enabled llama-server.
+### Browser (WASM) — experimental
+
+```bash
+cd crates/samhati-tui
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+trunk serve
+# Opens at http://localhost:8080
+```
+
+The browser build uses **ratzilla** (DomBackend) to render the same ratatui UI in your browser.
+Chat works via remote API — set the endpoint in the Settings tab.
 
 ### Inside the TUI
 
@@ -53,13 +66,13 @@ That's it. The install script builds everything including the TOPLOC-enabled lla
 ## How It Works
 
 ```
-You run the TUI
+You run the TUI (terminal or browser)
   ↓
 Identity loaded (~/.samhati/identity.json — one Ed25519 key for everything)
   ↓
 Reads Solana → finds all registered nodes → bootstraps iroh gossip
   ↓
-Auto-registers on Solana if new (₹0.25 one-time, auto-airdrop if needed)
+Auto-registers on Solana if new (auto-airdrop if needed)
   ↓
 You pick a model → llama-server starts (TOPLOC-enabled)
   ↓
@@ -97,13 +110,46 @@ Best answer shown to user
 
 ## Core Architecture
 
+```
+                    ┌─────────────────────────┐
+                    │  Shared Rendering Code   │
+                    │  ui.rs, tabs/*, app.rs   │
+                    │  (pure ratatui widgets)  │
+                    └─────────┬───────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+    ┌─────────▼──────────┐         ┌──────────▼──────────┐
+    │    main.rs          │         │   web_main.rs       │
+    │    (native)         │         │   (browser/WASM)    │
+    │                     │         │                     │
+    │  crossterm backend  │         │  ratzilla DomBackend│
+    │  tokio runtime      │         │  Rc<RefCell> state  │
+    │  filesystem I/O     │         │  browser fetch API  │
+    │  P2P networking     │         │  (remote node only) │
+    │  local llama exec   │         │                     │
+    └─────────────────────┘         └─────────────────────┘
+
+    cargo run -p samhati-tui        trunk serve
+    → terminal binary               → browser WASM app
+```
+
 | Component | Purpose |
 |-----------|---------|
-| `samhati-tui` | Terminal UI — chat, models, wallet, dashboard, settings |
+| `samhati-tui` | Terminal + browser UI — chat, models, wallet, dashboard, settings |
+| `mesh-node` | Network node — HTTP API (axum), iroh QUIC, gossip, rate limiting |
+| `inference-coordinator` | Distributed inference — RPC protocol, shard execution, KV cache |
+| `samhati-toploc` | TOPLOC proof system — prover, verifier, calibration |
+| `samhati-swarm` | Swarm consensus — fan-out, classification, coordination |
+| `samhati-ranking` | ELO engine + BradleyTerry aggregation |
+| `proximity-router` | Peer selection — latency, VRAM, layer ranges (std-only, zero deps) |
+| `cluster-manager` | Cluster constraints and node selection |
+| `model-config` | Model config parsing (params, quantization, architecture) |
+| `shard-store` | Content-addressed weight cache (BLAKE3) |
 | `llama-toploc/` | Patched llama.cpp with activation-level TOPLOC proofs |
-| `iroh` | P2P networking — QUIC transport, gossip, NAT traversal via relay |
-| `Solana program` | On-chain: node registry, ELO, rounds, domain demand, rewards |
-| `pipeline/` | Self-evolving: collect swarm data → SFT + DPO → GGUF → deploy |
+| `programs/samhati-protocol/` | Solana Anchor program (5 instructions, 3 PDAs) |
+| `sdk/` | Client SDKs — Rust, Python, TypeScript |
+| `app-tauri/` | Tauri v2 desktop app |
 
 ### Unified Identity
 
@@ -113,8 +159,22 @@ One Ed25519 keypair (`~/.samhati/identity.json`) for everything:
 |-----|--------|
 | Solana wallet | base58(pubkey) |
 | iroh P2P NodeId | hex(pubkey) |
-| TOPLOC proof signer | Ed25519 signature |
+| TOPLOC proof signer | Ed25519 signature (bound to node_pubkey) |
 | On-chain PDA | seeds=[b"node", pubkey] |
+
+### Security Hardening
+
+| Feature | Implementation |
+|---------|---------------|
+| API auth | Constant-time comparison (`subtle::ConstantTimeEq`) |
+| Rate limiting | Per-client by TCP socket address (not spoofable headers) |
+| TOPLOC verification | Node-to-key binding, 5-min freshness, reject when no keys registered |
+| RPC deserialization | 256 MB bincode size limit on all message types |
+| Gossip parsing | 64 KB max message size before JSON deserialization |
+| Identity file | 0600 permissions (Unix), warning on Windows |
+| P2P encryption | QUIC/TLS 1.3 via iroh (all traffic encrypted) |
+| Solana RPC | Configurable via `SOLANA_RPC_URL` env var (defaults to devnet) |
+| Supply chain | Cargo.lock tracked in git for reproducible builds |
 
 ### Auto-Mesh via Solana
 
@@ -135,12 +195,9 @@ Layer 0: attention + MLP → hidden_state → BLAKE3 hash
 Layer 1: attention + MLP → hidden_state → BLAKE3 hash
 ...
 Layer 31: attention + MLP → hidden_state → BLAKE3 hash
-→ Chain all 32 hashes → final proof hash → Ed25519 sign
-→ Returned in API response as "toploc_proof"
+→ Chain all 32 hashes → final proof hash → Ed25519 sign (bound to node_pubkey)
+→ Verifier checks: model hash, token count, chunk count, freshness, node binding, signature
 ```
-
-PrimeIntellect-equivalent strength. Different model/quantization/weights → different
-intermediate activations → different proof → caught 100%.
 
 Build: `./llama-toploc/build.sh`
 
@@ -206,30 +263,44 @@ Domain specialists earn **1.5x SMTI** on matched queries.
 ```
 Samhati/
 ├── crates/
-│   ├── samhati-tui/                # Terminal UI (the product)
+│   ├── samhati-tui/                # Terminal + browser UI
 │   │   └── src/
-│   │       ├── main.rs             # TUI loop, async tasks, settlement
+│   │       ├── main.rs             # Native TUI (crossterm backend, tokio)
+│   │       ├── web_main.rs         # Browser WASM (ratzilla DomBackend)
 │   │       ├── app.rs              # App state, 5 tabs, 21 models
-│   │       ├── swarm.rs            # Swarm inference: classify → fan-out → debate → rank → BT → ELO
-│   │       ├── identity.rs         # Unified Ed25519 identity (Solana + iroh + TOPLOC)
-│   │       ├── network.rs          # iroh P2P: gossip, peer discovery, announcements
-│   │       ├── registry.rs         # Solana: fetch nodes, register, submit_round, demand
-│   │       ├── settlement.rs       # Round payloads, local persistence, Solana settlement
+│   │       ├── ui.rs               # Shared rendering (pure ratatui)
+│   │       ├── swarm.rs            # Swarm: classify → fan-out → debate → rank → BT → ELO
+│   │       ├── identity.rs         # Unified Ed25519 identity
+│   │       ├── network.rs          # iroh P2P: gossip, peer discovery
+│   │       ├── registry.rs         # Solana: fetch nodes, register, submit_round
+│   │       ├── settlement.rs       # Round payloads, Solana settlement
 │   │       ├── node_runner.rs      # Spawns TOPLOC llama-server
 │   │       ├── model_download.rs   # HuggingFace GGUF downloads
 │   │       ├── wallet.rs           # Solana devnet wallet
-│   │       └── tabs/               # Chat, Dashboard, Models, Wallet, Settings UI
+│   │       ├── api.rs              # HTTP client for inference API
+│   │       ├── events.rs           # Keyboard event handling
+│   │       └── tabs/               # Chat, Dashboard, Models, Wallet, Settings
+│   │   └── index.html              # Trunk build config for WASM
+│   ├── mesh-node/                  # Network node (axum HTTP, iroh QUIC, gossip)
+│   ├── inference-coordinator/      # Distributed inference (RPC, shards, KV cache)
+│   ├── samhati-toploc/             # TOPLOC proofs (prover, verifier, calibration)
 │   ├── samhati-swarm/              # Swarm consensus traits
 │   ├── samhati-ranking/            # ELO + BradleyTerry engine
-│   ├── samhati-toploc/             # TOPLOC proof types
-│   ├── mesh-node/                  # Network node (iroh QUIC, gossip, API)
-│   └── ...                         # Infrastructure crates
+│   ├── proximity-router/           # Peer selection (std-only, zero deps)
+│   ├── cluster-manager/            # Cluster constraints
+│   ├── model-config/               # Model config parsing
+│   └── shard-store/                # Content-addressed weight cache (BLAKE3)
 ├── llama-toploc/                   # Patched llama.cpp with TOPLOC proofs
 │   ├── toploc-proof.h              # BLAKE3 activation hashing (~140 lines C++)
 │   ├── toploc.patch                # Diff to apply on llama.cpp
 │   └── build.sh                    # One command: clone → patch → build
 ├── programs/
-│   └── samhati-protocol/           # Solana Anchor program
+│   └── samhati-protocol/           # Solana Anchor program (5 instructions, 3 PDAs)
+├── sdk/
+│   ├── rust/                       # Rust SDK (reqwest, async streaming)
+│   ├── python/                     # Python SDK (httpx, sync + async)
+│   └── typescript/                 # TypeScript SDK (native fetch)
+├── app-tauri/                      # Tauri v2 desktop app
 ├── pipeline/                       # Self-evolving training (Python)
 ├── scripts/
 │   └── init_protocol.py            # Initialize ProtocolConfig on Solana
@@ -249,35 +320,30 @@ Samhati/
 | Agent diversity | [arXiv:2602.03794](https://arxiv.org/abs/2602.03794) | Use diverse models, not copies (2 diverse ≥ 16 same) |
 | Mixture of agents | [arXiv:2406.04692](https://arxiv.org/abs/2406.04692) | MoA-style refinement in debate round |
 | Adaptive routing | [RouteLLM (arXiv:2406.18665)](https://arxiv.org/abs/2406.18665) | Complexity classifier (Easy/Medium/Hard) |
-| Bittensor analysis | [arXiv:2507.02951](https://arxiv.org/abs/2507.02951) | ELO not stake — what we fix |
 | Speculative decoding | [EAGLE-3 (arXiv:2503.01840)](https://arxiv.org/abs/2503.01840) | Future: 4-6x per-node speedup |
 
 ---
 
 ## Roadmap
 
-### Done ✅
+### Done
 
-- [x] Terminal UI with 5 tabs
-- [x] 21 real models with HuggingFace downloads
-- [x] llama-server auto-start (TOPLOC-enabled)
-- [x] Swarm inference: fan-out → debate → LLM peer-rank → BradleyTerry
-- [x] Complexity classifier (Easy/Medium/Hard)
-- [x] Domain classifier (Code/Math/Reasoning/General)
-- [x] Adaptive node count (3 easy, 5 hard + debate)
-- [x] ELO tracking + persistence to disk
-- [x] Unified identity (one key for Solana + iroh + TOPLOC)
-- [x] iroh P2P + gossip + NAT traversal
-- [x] Auto-mesh via Solana node registry
-- [x] Auto-airdrop + auto-register for new users
-- [x] TOPLOC llama.cpp patch (activation-level proofs)
-- [x] Solana Anchor program (5 instructions + domain counters)
-- [x] ProtocolConfig on-chain (authority, emission, demand)
-- [x] submit_round wired (rounds go to Solana after each inference)
-- [x] Domain demand from Solana (Dashboard bars)
-- [x] Solana wallet (balance, airdrop, txs)
-- [x] Self-evolving training pipeline (Python)
-- [x] One-command install script
+- Terminal UI with 5 tabs + browser WASM target (ratzilla)
+- 21 real models with HuggingFace downloads
+- llama-server auto-start (TOPLOC-enabled)
+- Swarm inference: fan-out → debate → LLM peer-rank → BradleyTerry
+- Complexity classifier (Easy/Medium/Hard) + Domain classifier
+- Adaptive node count (3 easy, 5 hard + debate)
+- ELO tracking + persistence
+- Unified identity (one key for Solana + iroh + TOPLOC)
+- iroh P2P + gossip + NAT traversal
+- Auto-mesh via Solana node registry
+- Auto-airdrop + auto-register for new users
+- TOPLOC llama.cpp patch (activation-level proofs)
+- Solana Anchor program (5 instructions + domain counters)
+- Security hardening (constant-time auth, per-IP rate limit, proof freshness, gossip bounds)
+- Rust, Python, TypeScript SDKs
+- Tauri v2 desktop app
 
 ### Next
 
@@ -285,6 +351,7 @@ Samhati/
 - [ ] EAGLE-3 speculative decoding (4-6x speedup)
 - [ ] Trained difficulty classifier (RouteLLM-style)
 - [ ] React Native mobile app
+- [ ] Full WASM browser build (gate remaining native deps)
 - [ ] Domain AMM pools on Solana
 - [ ] Mainnet migration
 
@@ -294,7 +361,7 @@ Samhati/
 
 1. Fork and clone
 2. `cargo build` — must compile clean
-3. `cargo test` — all tests pass
+3. `cargo test` — all 48 tests pass
 4. One feature/fix per PR
 
 ---
