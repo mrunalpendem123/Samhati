@@ -1,10 +1,10 @@
-# Samhati — Free AI for Everyone, Forever
+# Samhati — Open Intelligence for Everyone, Forever
 
-**Samhati** is a decentralized AI inference network that makes frontier-level artificial intelligence permanently free for every person on earth. Every user is simultaneously a node operator — installing Samhati turns any device into both an AI consumer and an inference contributor, exactly like BitTorrent where downloading and uploading happen simultaneously.
+**Samhati** is a decentralized AI inference network — the BitTorrent of Intelligence. Every device that uses AI also provides AI. No corporation in the middle. No meter running. Just a global mesh of machines thinking together.
 
 ```
-BitTorrent:  download (consume)  +  upload (seed)    →  nobody pays
-Samhati:     query AI (use)      +  serve others (node) →  nobody pays
+BitTorrent:  download (consume)  +  upload (seed)    →  open bandwidth
+Samhati:     query AI (use)      +  serve others (node) →  open intelligence
              SMTI tokens reward node operators from protocol emission
 ```
 
