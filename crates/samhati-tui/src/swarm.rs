@@ -300,11 +300,17 @@ impl SwarmOrchestrator {
 
         let winner = &answers[winner_idx];
 
-        // ── Phase 4: ELO updates ──
+        // ── Phase 4: ELO updates (using real samhati-ranking crate) ──
+        // Build BT strengths map for the ranking crate
+        let bt_strengths: std::collections::HashMap<String, f64> = answers.iter().enumerate().map(|(i, a)| {
+            // Approximate strength from BT confidence — winner gets 1.0, others proportional
+            let strength = if i == winner_idx { 1.0 } else { (1.0 - confidence as f64).max(0.01) / (n as f64 - 1.0) };
+            (a.node_id.clone(), strength)
+        }).collect();
+
         let elo_updates = {
             let mut guard = self.nodes.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
-            let updates = update_elo(&mut guard, &answers, winner_idx);
-            // Persist ELO scores to disk
+            let updates = update_elo(&mut guard, &answers, winner_idx, &bt_strengths, Some(&domain));
             save_all_elos(&guard);
             updates
         };
@@ -875,19 +881,46 @@ async fn call_node_with_proof(
         return Err(anyhow::anyhow!("Empty response from node"));
     }
 
-    // Try to read TOPLOC proof from patched llama-server (intermediate layer activations)
-    let proof_hash = if let Some(proof_hex) = resp["toploc_proof"].as_str() {
-        // Patched llama-server: real activation-level proof (PrimeIntellect strength)
-        let mut hash = [0u8; 32];
-        if let Ok(bytes) = hex::decode(proof_hex) {
-            let len = bytes.len().min(32);
-            hash[..len].copy_from_slice(&bytes[..len]);
+    // Build TOPLOC proof from logprobs returned by llama.cpp
+    use samhati_toploc::proof::TokenLogits;
+    use samhati_toploc::prover::ToplocProver;
+
+    let mut prover = ToplocProver::new(model_name, *signing_key);
+
+    // Extract logprobs from OpenAI-compatible response
+    let logprobs_data = &resp["choices"][0]["logprobs"]["content"];
+    if let Some(tokens) = logprobs_data.as_array() {
+        for token_entry in tokens {
+            let token_str = token_entry["token"].as_str().unwrap_or("");
+            let token_id = crc32_hash(token_str.as_bytes());
+
+            let mut top_k: Vec<(u32, f32)> = Vec::new();
+            if let Some(top_arr) = token_entry["top_logprobs"].as_array() {
+                for lp in top_arr.iter().take(8) {
+                    let tok = lp["token"].as_str().unwrap_or("");
+                    let logprob = lp["logprob"].as_f64().unwrap_or(-100.0) as f32;
+                    top_k.push((crc32_hash(tok.as_bytes()), logprob));
+                }
+            }
+
+            if top_k.is_empty() {
+                // No logprobs available — use token itself as single entry
+                top_k.push((token_id, 0.0));
+            }
+
+            prover.record_token(TokenLogits { token_id, top_k });
         }
-        hash
+    }
+
+    let proof_hash = if prover.recorded_count() > 0 {
+        // Real TOPLOC proof from logprobs — signed, timestamped, node-bound
+        match prover.finalize() {
+            Ok(proof) => proof.proof_hash(),
+            Err(_) => *blake3::hash(content.as_bytes()).as_bytes(),
+        }
     } else {
-        // Unpatched llama-server: fall back to BLAKE3 hash of answer text
-        let hash = blake3::hash(content.as_bytes());
-        *hash.as_bytes()
+        // No logprobs in response — last resort fallback
+        *blake3::hash(content.as_bytes()).as_bytes()
     };
 
     Ok((content, proof_hash))
@@ -1072,39 +1105,88 @@ fn heuristic_bt_select(scores: &[f64]) -> (usize, f32) {
     (idx, p as f32)
 }
 
-/// Update ELO scores for all participating nodes.
+/// Update ELO scores using the real samhati-ranking crate.
+/// Proper K-factor (32 new / 16 established), ELO floor (100),
+/// domain-specific tracking, and BradleyTerry strength integration.
 fn update_elo(
     nodes: &mut [SwarmNode],
     answers: &[NodeAnswer],
     winner_idx: usize,
+    bt_strengths: &std::collections::HashMap<String, f64>,
+    domain: Option<&str>,
 ) -> Vec<(String, i32)> {
-    let participating_elos: Vec<f64> = answers
-        .iter()
-        .filter_map(|a| nodes.iter().find(|n| n.id == a.node_id).map(|n| n.elo as f64))
-        .collect();
-    let avg_elo = if participating_elos.is_empty() {
-        1500.0
-    } else {
-        participating_elos.iter().sum::<f64>() / participating_elos.len() as f64
+    use samhati_ranking::{EloStore, RoundOutcome, NodeId};
+
+    let mut store = EloStore::new();
+
+    // Register all participating nodes with their current ELO
+    for answer in answers {
+        if let Some(node) = nodes.iter().find(|n| n.id == answer.node_id) {
+            let mut node_id: NodeId = [0u8; 32];
+            let bytes = answer.node_id.as_bytes();
+            let len = bytes.len().min(32);
+            node_id[..len].copy_from_slice(&bytes[..len]);
+            store.register(node_id);
+            // Set existing ELO (override default 1500)
+            if let Some(rating) = store.ratings_mut().get_mut(&node_id) {
+                rating.score = node.elo;
+                rating.total_rounds = node.rounds_played as u64;
+                rating.rounds_won = node.rounds_won as u64;
+            }
+        }
+    }
+
+    // Build winner NodeId
+    let winner_answer = &answers[winner_idx];
+    let mut winner_id: NodeId = [0u8; 32];
+    let wb = winner_answer.node_id.as_bytes();
+    winner_id[..wb.len().min(32)].copy_from_slice(&wb[..wb.len().min(32)]);
+
+    // Convert BT strengths to NodeId keys
+    let mut strengths = std::collections::HashMap::new();
+    for (id_str, &strength) in bt_strengths {
+        let mut nid: NodeId = [0u8; 32];
+        let b = id_str.as_bytes();
+        nid[..b.len().min(32)].copy_from_slice(&b[..b.len().min(32)]);
+        strengths.insert(nid, strength);
+    }
+
+    // Build participants list
+    let participants: Vec<NodeId> = answers.iter().map(|a| {
+        let mut nid: NodeId = [0u8; 32];
+        let b = a.node_id.as_bytes();
+        nid[..b.len().min(32)].copy_from_slice(&b[..b.len().min(32)]);
+        nid
+    }).collect();
+
+    let outcome = RoundOutcome {
+        participants,
+        winner: winner_id,
+        strengths,
+        domain: domain.map(|d| d.to_string()),
     };
 
+    let deltas = store.update_round(&outcome);
+
+    // Apply deltas back to SwarmNodes
     let mut updates = Vec::new();
-
-    for (i, answer) in answers.iter().enumerate() {
-        if let Some(node) = nodes.iter_mut().find(|n| n.id == answer.node_id) {
-            node.rounds_played += 1;
-
-            let k = if node.rounds_played < 30 { 32 } else { 16 };
-            let actual = if i == winner_idx { 1.0 } else { 0.0 };
-            let expected = 1.0 / (1.0 + 10.0_f64.powf((avg_elo - node.elo as f64) / 400.0));
-            let delta = (k as f64 * (actual - expected)).round() as i32;
-            node.elo = (node.elo + delta).max(100);
-
-            if i == winner_idx {
-                node.rounds_won += 1;
+    for (nid, delta) in &deltas {
+        // Find the node by matching the NodeId bytes
+        for answer in answers.iter() {
+            let mut check_id: NodeId = [0u8; 32];
+            let b = answer.node_id.as_bytes();
+            check_id[..b.len().min(32)].copy_from_slice(&b[..b.len().min(32)]);
+            if &check_id == nid {
+                if let Some(node) = nodes.iter_mut().find(|n| n.id == answer.node_id) {
+                    node.elo = (node.elo + delta).max(100);
+                    node.rounds_played += 1;
+                    if &check_id == &winner_id {
+                        node.rounds_won += 1;
+                    }
+                    updates.push((node.id.clone(), node.elo));
+                }
+                break;
             }
-
-            updates.push((node.id.clone(), node.elo));
         }
     }
 
@@ -1270,7 +1352,8 @@ mod tests {
                 proof_hash: [0u8; 32],
             },
         ];
-        let updates = update_elo(&mut nodes, &answers, 0);
+        let bt_strengths: std::collections::HashMap<String, f64> = [("a".into(), 1.0), ("b".into(), 0.2)].into();
+        let updates = update_elo(&mut nodes, &answers, 0, &bt_strengths, Some("General"));
         assert_eq!(updates.len(), 2);
         assert!(nodes[0].elo > 1500);
         assert!(nodes[1].elo < 1500);

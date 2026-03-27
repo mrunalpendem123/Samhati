@@ -515,16 +515,30 @@ fn activate_model(
             app.download_status = format!("{} is running on port {}", model_name, node_runner.port);
 
             // Announce to P2P network so other nodes can discover us.
-            // Don't broadcast localhost — remote peers can't reach it
-            // and it would cause confused-deputy SSRF on their machines.
-            // TODO: detect external IP for public nodes.
-            // For now, only announce to gossip with empty URL (presence only,
-            // not inference-ready for remote peers).
+            // Detect LAN IP for local network swarms.
+            // Public nodes should set SAMHATI_EXTERNAL_IP env var.
+            let inference_url = {
+                let port = node_runner.port;
+                if let Ok(ext_ip) = std::env::var("SAMHATI_EXTERNAL_IP") {
+                    format!("http://{}:{}", ext_ip, port)
+                } else {
+                    // Auto-detect LAN IP
+                    detect_lan_ip()
+                        .map(|ip| format!("http://{}:{}", ip, port))
+                        .unwrap_or_default()
+                }
+            };
+
             if let Some(ref nh) = net_handle {
+                if !inference_url.is_empty() {
+                    eprintln!("[network] Broadcasting inference URL: {}", inference_url);
+                } else {
+                    eprintln!("[network] No external IP detected — presence-only mode");
+                }
                 nh.set_announcement(NodeAnnouncement {
                     solana_pubkey: app.wallet_pubkey.clone(),
                     iroh_node_id: app.node_id.clone(),
-                    inference_url: String::new(), // don't broadcast localhost
+                    inference_url,
                     model_name: model_name.clone(),
                     port: node_runner.port,
                 });
@@ -782,6 +796,18 @@ fn check_chat(
             }
         }
     }
+}
+
+/// Detect the machine's LAN IP by connecting to a public address.
+/// This doesn't actually send data — just uses the OS routing table
+/// to determine which local interface would be used.
+fn detect_lan_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    let ip = addr.ip();
+    if ip.is_loopback() { return None; }
+    Some(ip.to_string())
 }
 
 fn check_airdrop(

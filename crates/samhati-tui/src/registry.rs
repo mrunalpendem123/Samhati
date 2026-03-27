@@ -344,9 +344,17 @@ pub async fn submit_round(
     // round_id: u64
     ix_data.extend_from_slice(&payload.round_id.to_le_bytes());
 
-    // participants: Vec<Pubkey> (for now, use our own pubkey as placeholder)
-    ix_data.extend_from_slice(&1u32.to_le_bytes()); // 1 participant
-    ix_data.extend_from_slice(public_key);            // our pubkey
+    // participants: Vec<Pubkey>
+    let participant_keys: Vec<[u8; 32]> = payload.participants.iter().filter_map(|p| {
+        bs58::decode(p).into_vec().ok().and_then(|v| {
+            if v.len() >= 32 { let mut arr = [0u8; 32]; arr.copy_from_slice(&v[..32]); Some(arr) }
+            else { None }
+        })
+    }).collect();
+    ix_data.extend_from_slice(&(participant_keys.len() as u32).to_le_bytes());
+    for key in &participant_keys {
+        ix_data.extend_from_slice(key);
+    }
 
     // proof_hashes: Vec<[u8;32]>
     ix_data.extend_from_slice(&(payload.proof_hashes.len() as u32).to_le_bytes());
@@ -360,8 +368,12 @@ pub async fn submit_round(
         ix_data.extend_from_slice(&delta.to_le_bytes());
     }
 
-    // winner: Pubkey (our pubkey for single-node rounds)
-    ix_data.extend_from_slice(public_key);
+    // winner: Pubkey
+    let winner_key = bs58::decode(&payload.winner).into_vec().unwrap_or_else(|_| public_key.to_vec());
+    let mut winner_arr = [0u8; 32];
+    let wlen = winner_key.len().min(32);
+    winner_arr[..wlen].copy_from_slice(&winner_key[..wlen]);
+    ix_data.extend_from_slice(&winner_arr);
 
     // smti_emitted: u64
     ix_data.extend_from_slice(&payload.smti_emitted.to_le_bytes());
@@ -391,18 +403,35 @@ pub async fn submit_round(
         node_pda_arr.copy_from_slice(&node_pda[..32]);
     }
 
+    // Build account metas: fixed accounts + remaining_accounts (one node PDA per participant)
+    let mut accounts = vec![
+        AccountMeta { pubkey: *public_key, is_signer: true, is_writable: true },
+        AccountMeta { pubkey: config_pda_arr, is_signer: false, is_writable: true },
+        AccountMeta { pubkey: round_pda_arr, is_signer: false, is_writable: true },
+        AccountMeta { pubkey: system_program, is_signer: false, is_writable: false },
+    ];
+
+    // Add node PDA for each participant as remaining_accounts
+    for pkey in &participant_keys {
+        let pkey_str = bs58::encode(pkey).into_string();
+        let npda = solana_find_pda(&["string:node", &format!("pubkey:{}", pkey_str)])
+            .unwrap_or_default();
+        if !npda.is_empty() {
+            if let Ok(bytes) = bs58::decode(&npda).into_vec() {
+                if bytes.len() >= 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes[..32]);
+                    accounts.push(AccountMeta { pubkey: arr, is_signer: false, is_writable: true });
+                }
+            }
+        }
+    }
+
     let tx = build_transaction(
         public_key,
         &blockhash,
         &program_id,
-        &[
-            AccountMeta { pubkey: *public_key, is_signer: true, is_writable: true },
-            AccountMeta { pubkey: config_pda_arr, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: round_pda_arr, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: system_program, is_signer: false, is_writable: false },
-            // remaining_accounts: node PDAs
-            AccountMeta { pubkey: node_pda_arr, is_signer: false, is_writable: true },
-        ],
+        &accounts,
         &ix_data,
         &signing_key,
     );

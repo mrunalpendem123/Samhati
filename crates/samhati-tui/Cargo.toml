@@ -40,6 +40,8 @@ blake3 = "1"
 iroh = "0.96"
 iroh-gossip = "0.96"
 tracing = "0.1"
+samhati-toploc = { path = "../samhati-toploc" }
+samhati-ranking = { path = "../samhati-ranking" }
 ratzilla = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 
