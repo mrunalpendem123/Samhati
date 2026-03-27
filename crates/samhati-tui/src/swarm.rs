@@ -887,24 +887,33 @@ async fn call_node_with_proof(
 
     let mut prover = ToplocProver::new(model_name, *signing_key);
 
-    // Extract logprobs from OpenAI-compatible response
+    // Extract logprobs from OpenAI-compatible response (llama.cpp / Ollama / vLLM)
     let logprobs_data = &resp["choices"][0]["logprobs"]["content"];
     if let Some(tokens) = logprobs_data.as_array() {
         for token_entry in tokens {
-            let token_str = token_entry["token"].as_str().unwrap_or("");
-            let token_id = crc32_hash(token_str.as_bytes());
+            // Use actual token ID from server if available, else CRC32 of token string
+            let token_id = token_entry["id"].as_u64()
+                .map(|id| id as u32)
+                .unwrap_or_else(|| {
+                    let token_str = token_entry["token"].as_str().unwrap_or("");
+                    crc32_hash(token_str.as_bytes())
+                });
 
             let mut top_k: Vec<(u32, f32)> = Vec::new();
             if let Some(top_arr) = token_entry["top_logprobs"].as_array() {
                 for lp in top_arr.iter().take(8) {
-                    let tok = lp["token"].as_str().unwrap_or("");
+                    let tok_id = lp["id"].as_u64()
+                        .map(|id| id as u32)
+                        .unwrap_or_else(|| {
+                            let tok = lp["token"].as_str().unwrap_or("");
+                            crc32_hash(tok.as_bytes())
+                        });
                     let logprob = lp["logprob"].as_f64().unwrap_or(-100.0) as f32;
-                    top_k.push((crc32_hash(tok.as_bytes()), logprob));
+                    top_k.push((tok_id, logprob));
                 }
             }
 
             if top_k.is_empty() {
-                // No logprobs available — use token itself as single entry
                 top_k.push((token_id, 0.0));
             }
 
