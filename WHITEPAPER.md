@@ -77,18 +77,29 @@ Rankings from higher-ELO judges carry more weight. The algorithm typically conve
 
 ## 5. ELO Reputation
 
-Each node maintains an ELO rating [3], starting at 1500. After each round, the winner gains ELO and losers lose ELO, proportional to the surprise of the outcome.
+Each node maintains a reputation score R ∈ [0, 1] computed from two independent tracks:
 
 ```
-Expected(A vs B) = 1 / (1 + 10^((ELO_B - ELO_A) / 400))
-Delta = K × (actual - expected)
+R = 0.4 × R_ranking + 0.6 × R_generation
 ```
 
-The K-factor is adaptive: K=32 for nodes with fewer than 1000 rounds (fast calibration), K=16 for established nodes (stability). ELO has a floor of 100 — no node drops below this. Nodes that fail proof verification are slashed 200 ELO.
+**R_generation** measures answer quality — did your answer win? Updated via exponential moving average:
 
-Domain-specific ELO is tracked separately: a node may be rated 1800 for Code queries but 1400 for Math. The network uses these domain ratings when selecting nodes for domain-classified queries.
+```
+R_gen(t+1) = 0.85 × R_gen(t) + 0.15 × (1 if won, 0 if lost)
+```
 
-ELO serves two purposes: it determines which nodes are selected for future rounds (higher ELO = more selection), and it weights their rankings in BradleyTerry aggregation (higher ELO judge = more influence).
+**R_ranking** measures judgment quality — did your rankings agree with BradleyTerry consensus? A node that gives good answers but ranks dishonestly will be caught: its R_ranking drops even if R_generation stays high. Single-track systems like ELO cannot detect this.
+
+**Uncertainty (σ):** Each node starts with σ = 0.4 (uncertain) which decays 5% per round to a minimum of 0.05 (established). Inspired by TrueSkill's Bayesian skill tracking.
+
+**Adaptive validation rate:** New nodes (high σ) are audited ~50% of rounds. Trusted nodes (high R, low σ) are audited ~2%. This reduces verification cost by 25× without sacrificing security.
+
+```
+validation_rate = 50% - (50% - 2%) × R × (1 - σ)
+```
+
+Domain-specific R_generation is tracked independently for Code, Math, Reasoning, and General. Nodes that fail proof verification are slashed to 0 and must recalibrate. Inactive nodes decay 2% per round.
 
 ---
 

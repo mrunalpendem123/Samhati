@@ -45,7 +45,7 @@ Mrunal Pendem\\
 
 % ══════════════════════════════════════════
 \begin{abstract}
-A purely peer-to-peer intelligence network would allow any device to serve AI inference without relying on centralized providers. AI today depends on corporate infrastructure---users pay per query, have no choice of model, and cannot verify what served their request. We propose a system where every participant simultaneously consumes and contributes intelligence. Queries fan out to multiple independent nodes running small language models. Nodes peer-rank each other's answers, and BradleyTerry maximum likelihood estimation selects the statistically best response. A cryptographic Proof of Inference built from output logprobs prevents replay and binds proofs to node identities. ELO ratings track quality over time. Results settle on Solana. The system requires no staking, no special hardware, and no permission to join.
+A purely peer-to-peer intelligence network would allow any device to serve AI inference without relying on centralized providers. AI today depends on corporate infrastructure---users pay per query, have no choice of model, and cannot verify what served their request. We propose a system where every participant simultaneously consumes and contributes intelligence. Queries fan out to multiple independent nodes running small language models. Nodes peer-rank each other's answers, and BradleyTerry maximum likelihood estimation selects the statistically best response. A cryptographic Proof of Inference built from output logprobs prevents replay and binds proofs to node identities. A dual-track EMA reputation system tracks both answer quality and ranking honesty, with Bayesian uncertainty and adaptive validation rates. Results settle on Solana. The system requires no staking, no special hardware, and no permission to join.
 \end{abstract}
 
 \vspace{1em}
@@ -93,17 +93,35 @@ P(i \succ j) = \frac{e^{\beta_i}}{e^{\beta_i} + e^{\beta_j}}
 The algorithm iterates until convergence ($\max|\Delta\beta| < 10^{-6}$), typically in 10--25 iterations. Rankings from higher-rated judges carry more weight. The winner is $\arg\max_i \beta_i$.
 
 % ══════════════════════════════════════════
-\section{ELO Reputation}
+\section{Reputation}
 
-Each node maintains an ELO rating~\cite{elo}, starting at 1500:
+Each node maintains a reputation score $R \in [0, 1]$ computed from two independent tracks:
 
 \begin{equation}
-\Delta = K \times \left(\text{actual} - \frac{1}{1 + 10^{(R_B - R_A)/400}}\right)
+R = \alpha \cdot R_{\text{ranking}} + (1 - \alpha) \cdot R_{\text{generation}}, \quad \alpha = 0.4
 \end{equation}
 
-$K=32$ for new nodes (fast calibration), $K=16$ for established nodes (stability). The floor is 100. Nodes that fail proof verification lose 200 points.
+$R_{\text{generation}}$ measures answer quality: did this node's answer win? Updated via exponential moving average after each round:
 
-Domain-specific ratings are tracked independently. A node rated 1800 for Code and 1400 for Math will be selected for coding queries but not mathematical ones. ELO determines both selection priority and ranking weight in BradleyTerry.
+\begin{equation}
+R_{\text{gen}}^{(t+1)} = (1 - \beta) \cdot R_{\text{gen}}^{(t)} + \beta \cdot \mathbb{1}[\text{won}], \quad \beta = 0.15
+\end{equation}
+
+$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly---a failure mode that single-track systems like ELO~\cite{elo} cannot detect.
+
+Each node also carries an uncertainty $\sigma$, starting at 0.4 and decaying by 5\% per round to a minimum of 0.05. High uncertainty means we do not yet trust this node's rating. This is inspired by TrueSkill's Bayesian treatment of skill~\cite{trueskill}, applied here to reputation rather than game skill.
+
+Uncertainty feeds an adaptive validation rate. New nodes with high $\sigma$ are audited in approximately 50\% of rounds. Established nodes with low $\sigma$ and high $R$ are audited in approximately 2\% of rounds:
+
+\begin{equation}
+v = v_{\max} - (v_{\max} - v_{\min}) \cdot R \cdot (1 - \sigma), \quad v_{\max} = 0.5, \; v_{\min} = 0.02
+\end{equation}
+
+This reduces verification cost by an order of magnitude without sacrificing security---an approach demonstrated by Hyperbolic's Proof of Sampling protocol~\cite{posp}.
+
+Domain-specific $R_{\text{generation}}$ is tracked independently for Code, Math, Reasoning, and General. A node strong in Code but weak in Math will be selected for coding queries but not mathematical ones.
+
+Nodes that fail proof verification are slashed: reputation drops to zero and the node must pass recalibration before re-entering the swarm. Inactive nodes decay at 2\% per round of absence.
 
 % ══════════════════════════════════════════
 \section{Proof of Inference}
@@ -171,14 +189,14 @@ Each round settles on Solana via a single transaction containing participant key
 
 \textbf{Replay.} Proofs expire in 5 minutes and are bound to a unique public key. A proof from node $A$ cannot be submitted by node $B$.
 
-\textbf{Freeloading.} A node running a weak model will consistently lose in ranking. Its ELO decays, reducing both selection probability and reward share. Quality self-selects without model verification.
+\textbf{Freeloading.} A node running a weak model will consistently lose in ranking. Its $R_{\text{generation}}$ decays via EMA, reducing both selection probability and reward share. Quality self-selects without model verification.
 
 \textbf{Self-promotion.} Judges evaluate factual correctness only. Persuasive language is excluded by prompt design. Nodes cannot judge their own answers.
 
 % ══════════════════════════════════════════
 \section{Conclusion}
 
-We have proposed a peer-to-peer intelligence network where every participant simultaneously uses and provides AI inference. Queries fan out to multiple nodes running small language models. Peer ranking selects the best answer via BradleyTerry. ELO tracks quality over time. Cryptographic proofs prevent replay and tampering. Random judge assignment prevents collusion. Results settle on Solana.
+We have proposed a peer-to-peer intelligence network where every participant simultaneously uses and provides AI inference. Queries fan out to multiple nodes running small language models. Peer ranking selects the best answer via BradleyTerry. Dual-track EMA reputation tracks both answer quality and ranking honesty. Cryptographic proofs prevent replay and tampering. Random judge assignment prevents collusion. Results settle on Solana.
 
 The system requires no staking, no special hardware, and no permission to join. Quality is enforced by competition, not capital. The barrier to entry is a laptop, not a wallet.
 
@@ -229,6 +247,12 @@ n0 Computer, ``iroh,'' \url{https://iroh.computer}, 2024.
 
 \bibitem{solana}
 Solana Foundation, ``Solana Whitepaper,'' 2020.
+
+\bibitem{trueskill}
+T.~Minka et al., ``TrueSkill 2: An Improved Bayesian Skill Rating System,'' Microsoft Research, 2018.
+
+\bibitem{posp}
+Hyperbolic Labs, ``Proof of Sampling: A Nash Equilibrium for Verification,'' \url{https://www.hyperbolic.ai/blog/deep-dive-into-hyperbolic-proof-of-sampling}, 2025.
 
 \end{thebibliography}
 
