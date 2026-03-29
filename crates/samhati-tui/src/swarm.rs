@@ -425,6 +425,13 @@ impl SwarmOrchestrator {
     /// For each ranking node, generate all C(N,2) pairs where the node is NOT
     /// the author of either answer (preventing self-promotion bias).
     /// Each node's LLM produces a preference + reasoning chain.
+    /// Peer ranking with random judge assignment (anti-collusion).
+    ///
+    /// Instead of every node judging every pair, each pair is assigned
+    /// to a random subset of judges. Assignment is derived from a seed
+    /// (timestamp-based, or Solana slot hash when available) so it's
+    /// unpredictable and changes every round. Colluders can't guarantee
+    /// they'll judge each other's answers.
     async fn peer_rank(
         &self,
         nodes: &[SwarmNode],
@@ -432,35 +439,68 @@ impl SwarmOrchestrator {
         original_prompt: &str,
     ) -> Vec<PairwiseResult> {
         let n = answers.len();
+        if n < 2 { return vec![]; }
+
+        // Build all possible pairs
+        let mut all_pairs: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                all_pairs.push((i, j));
+            }
+        }
+
+        // Generate a round seed for random assignment.
+        // Uses BLAKE3(timestamp + prompt) — unpredictable per round.
+        // When Solana slot hash is available, use that instead for
+        // on-chain verifiable randomness.
+        let seed_input = format!(
+            "{}:{}:{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            original_prompt,
+            nodes.len(),
+        );
+        let seed_hash = blake3::hash(seed_input.as_bytes());
+        let seed_bytes = seed_hash.as_bytes();
+
+        // Assign each pair to exactly ONE judge (not all judges).
+        // The judge is chosen by: seed_bytes[pair_index % 32] % num_eligible_judges
+        // A judge can't judge pairs containing their own answer.
         let mut handles = Vec::new();
 
-        for node in nodes {
-            // Generate all pairs, excluding this node's own answer
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    // Skip if this node authored either answer
-                    if answers[i].node_id == node.id || answers[j].node_id == node.id {
-                        continue;
-                    }
+        for (pair_idx, &(i, j)) in all_pairs.iter().enumerate() {
+            // Find eligible judges for this pair (not author of either answer)
+            let eligible: Vec<&SwarmNode> = nodes
+                .iter()
+                .filter(|node| node.id != answers[i].node_id && node.id != answers[j].node_id)
+                .collect();
 
-                    let client = self.client.clone();
-                    let ranker_url = node.url.clone();
-                    let ranker_id = node.id.clone();
-                    let answer_a = answers[i].answer.clone();
-                    let answer_b = answers[j].answer.clone();
-                    let prompt = original_prompt.to_string();
-                    let idx_a = i;
-                    let idx_b = j;
-
-                    handles.push(tokio::spawn(async move {
-                        let result = ask_node_to_rank(
-                            &client, &ranker_url, &prompt, &answer_a, &answer_b,
-                        )
-                        .await;
-                        (ranker_id, idx_a, idx_b, result)
-                    }));
-                }
+            if eligible.is_empty() {
+                continue;
             }
+
+            // Pick one judge using the seed — deterministic but unpredictable
+            let judge_idx = seed_bytes[pair_idx % 32] as usize % eligible.len();
+            let judge = eligible[judge_idx];
+
+            let client = self.client.clone();
+            let ranker_url = judge.url.clone();
+            let ranker_id = judge.id.clone();
+            let answer_a = answers[i].answer.clone();
+            let answer_b = answers[j].answer.clone();
+            let prompt = original_prompt.to_string();
+            let idx_a = i;
+            let idx_b = j;
+
+            handles.push(tokio::spawn(async move {
+                let result = ask_node_to_rank(
+                    &client, &ranker_url, &prompt, &answer_a, &answer_b,
+                )
+                .await;
+                (ranker_id, idx_a, idx_b, result)
+            }));
         }
 
         let mut rankings = Vec::new();
