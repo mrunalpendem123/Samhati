@@ -2,7 +2,7 @@
 name = "samhati-toploc"
 version = "0.1.0"
 edition = "2021"
-description = "TOPLOC (Token-Level Proof of Compute) — cryptographic verification that a node ran real inference"
+description = "Proof of Inference (PoI) — cryptographic proof built from output logprobs, Ed25519-signed, with model binding, node binding, and freshness checks"
 
 [dependencies]
 blake3 = "1"

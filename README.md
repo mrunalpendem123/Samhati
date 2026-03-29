@@ -8,9 +8,9 @@ Samhati:     query AI (use)      +  serve others (node) →  open intelligence
              SMTI tokens reward node operators from protocol emission
 ```
 
-The core mechanism is **swarm intelligence**: queries fan out to N independent nodes via **iroh QUIC**. Each node runs **llama.cpp** inference and attaches a **TOPLOC** cryptographic proof. The same N nodes peer-rank each other's answers. **BradleyTerry** aggregation selects the winner — achieving **85.90% on GPQA Diamond** vs 68.69% for majority voting.
+The core mechanism is **swarm intelligence**: queries fan out to N independent nodes via **iroh QUIC**. Each node runs **llama.cpp** inference and attaches a **Proof of Inference (PoI)**. The same N nodes peer-rank each other's answers. **BradleyTerry** aggregation selects the winner — designed to exceed majority-voting baselines through swarm consensus.
 
-> Built on **Solana** · Powered by **TOPLOC**
+> Built on **Solana** · Powered by **Proof of Inference**
 
 ---
 
@@ -19,7 +19,7 @@ The core mechanism is **swarm intelligence**: queries fan out to N independent n
 1. [Quick Start](#quick-start)
 2. [How It Works](#how-it-works)
 3. [Swarm Inference](#swarm-inference)
-4. [TOPLOC Proof System](#toploc-proof-system)
+4. [Proof of Inference (PoI)](#proof-of-inference-poi)
 5. [ELO + BradleyTerry Ranking](#elo--bradleyterry-ranking)
 6. [iroh P2P Networking](#iroh-p2p-networking)
 7. [Solana Smart Contract](#solana-smart-contract)
@@ -89,7 +89,7 @@ Reads Solana → finds all registered nodes → bootstraps iroh gossip
   ↓
 Auto-registers on Solana if new (auto-airdrop if needed)
   ↓
-You pick a model → llama-server starts (TOPLOC-enabled)
+You pick a model → llama-server starts (PoI-enabled)
   ↓
 Announces to gossip → other nodes discover you automatically
   ↓
@@ -100,7 +100,7 @@ Complexity classifier → Easy (3 nodes) / Medium (3 nodes) / Hard (5 nodes + de
 Domain classifier → Code / Math / Reasoning / General
   ↓
 Phase 1: Fan out to N nodes in parallel
-  Each runs llama-server → answer + TOPLOC proof hash
+  Each runs llama-server → answer + PoI proof hash
   ↓
 Phase 1.5 (hard queries only): Debate round
   Each node sees others' answers, rewrites its own (arXiv:2305.14325)
@@ -141,7 +141,7 @@ pub struct NodeAnswer {
     pub answer: String,
     pub latency_ms: u64,
     pub model: String,
-    pub proof_hash: Option<[u8; 32]>,   // BLAKE3 of TOPLOC proof
+    pub proof_hash: Option<[u8; 32]>,   // BLAKE3 of PoI proof
 }
 ```
 
@@ -181,11 +181,11 @@ pub struct SwarmConfig {
 
 ---
 
-## TOPLOC Proof System
+## Proof of Inference (PoI)
 
 **Files:** `crates/samhati-toploc/src/`
 
-TOPLOC (Top-K Logit Output Commitment) is a cryptographic proof that a node actually ran inference with the correct model. It works by committing to the top-K logit values at each token generation step, then signing the commitment chain.
+Proof of Inference (PoI) is a cryptographic proof that a node actually ran inference. It commits to the top-K logit values at each token generation step, BLAKE3 hashes them in 32-token chunks, and Ed25519-signs the chain. Not to be confused with activation-level PoI (PrimeIntellect) which hashes internal layer states — PoI operates on output logprobs only.
 
 ### How Proofs Are Created (Prover)
 
@@ -249,7 +249,7 @@ pub enum VerificationResult {
 
 ### Calibration
 
-Before a new node is trusted, it must pass a calibration round. The verifier sends 10 prompts from a built-in template pool (20 templates covering capitals, math, translations, chemistry, etc.). The node generates responses with TOPLOC proofs. All 10 proofs must verify correctly. On first calibration, any valid proof is accepted. On subsequent calibrations, the proof hashes must match previous runs (deterministic inference = deterministic proofs).
+Before a new node is trusted, it must pass a calibration round. The verifier sends 10 prompts from a built-in template pool (20 templates covering capitals, math, translations, chemistry, etc.). The node generates responses with PoI proofs. All 10 proofs must verify correctly. On first calibration, any valid proof is accepted. On subsequent calibrations, the proof hashes must match previous runs (deterministic inference = deterministic proofs).
 
 ---
 
@@ -277,7 +277,7 @@ delta = K * (actual_score - expected_score)
 new_elo = max(old_elo + delta, 100)    // ELO floor = 100
 ```
 
-**Slash penalty:** If a node fails TOPLOC verification, it loses 200 ELO immediately.
+**Slash penalty:** If a node fails PoI verification, it loses 200 ELO immediately.
 
 **Domain-specific ELO:** Each node tracks separate ELO scores per domain (Code, Math, Reasoning, General). A node might be ELO 1800 for Code queries but 1400 for Math queries.
 
@@ -430,7 +430,7 @@ For actual inference requests between nodes, Samhati uses a binary RPC protocol 
 **NodeAccount** (PDA: `[b"node", operator_pubkey]`) — per-node:
 - `operator` — Solana pubkey (= iroh NodeId when hex-encoded)
 - `elo_score` — starts 1500, floor 100
-- `calibrated` — passed TOPLOC calibration?
+- `calibrated` — passed PoI calibration?
 - `model_name` — e.g. "Qwen2.5-7B" (max 64 bytes)
 - `total_rounds` / `rounds_won` — participation stats
 - `pending_rewards` — unclaimed SMTI lamports
@@ -438,7 +438,7 @@ For actual inference requests between nodes, Samhati uses a binary RPC protocol 
 
 **RoundAccount** (PDA: `[b"round", round_id_le_bytes]`) — per-round:
 - `participants` — up to 256 node pubkeys
-- `proof_hashes` — BLAKE3 of each node's TOPLOC proof
+- `proof_hashes` — BLAKE3 of each node's PoI proof
 - `elo_deltas` — signed i32 per participant
 - `winner` — must be in participants list
 - `domain` — 0=General, 1=Code, 2=Math, 3=Reasoning
@@ -449,7 +449,7 @@ For actual inference requests between nodes, Samhati uses a binary RPC protocol 
 |------------|-----|------|
 | `initialize` | Deployer (once) | Create ProtocolConfig, set authority + mint + vault |
 | `register_node` | Any node | Create NodeAccount PDA, set ELO=1500 |
-| `calibrate_node` | Authority | Mark node as TOPLOC-verified |
+| `calibrate_node` | Authority | Mark node as PoI-verified |
 | `submit_round` | Authority | Create RoundAccount, update all participant ELOs, credit rewards, increment domain counters |
 | `slash_node` | Authority | Reduce ELO by 200, burn 10% of stake |
 | `emit_rewards` | Anyone | Transfer pending rewards from vault to node operator |
@@ -477,7 +477,7 @@ One Ed25519 keypair stored at `~/.samhati/identity.json` derives every identity 
               ┌───────────────┼───────────────┐
               │               │               │
     ┌─────────▼──────┐ ┌─────▼──────┐ ┌──────▼─────────┐
-    │ Solana Wallet  │ │ iroh P2P   │ │ TOPLOC Signer  │
+    │ Solana Wallet  │ │ iroh P2P   │ │ PoI Signer  │
     │ base58(pubkey) │ │ hex(pubkey)│ │ Ed25519 sign() │
     │ "5EZ7Q..."     │ │ "a3b4c5.." │ │                │
     └────────────────┘ └────────────┘ └────────────────┘
@@ -633,7 +633,7 @@ After each swarm round, results are settled both locally and on-chain:
 1. **Build payload** from `SwarmRoundResult`:
    - Extract participant Solana pubkeys
    - Compute ELO deltas
-   - Capture TOPLOC proof hashes (BLAKE3 of proof bytes)
+   - Capture PoI proof hashes (BLAKE3 of proof bytes)
    - Map domain string to u64: Code→1, Math→2, Reasoning→3, General→0
 
 2. **Save to disk** at `~/.samhati/pending_rounds/round_{id}.json`
@@ -669,9 +669,9 @@ Operators see what the network needs and choose specialist models accordingly.
 |-------|-----------|---------------|
 | **API Auth** | Timing-attack resistant | `subtle::ConstantTimeEq` for token comparison |
 | **Rate Limiting** | Per-client by real IP | `ConnectInfo<SocketAddr>` (not spoofable XFF) |
-| **TOPLOC Proofs** | Node binding | `node_pubkey` field ties proof to specific node |
-| **TOPLOC Proofs** | Freshness | 5-minute max age (configurable), prevents replay |
-| **TOPLOC Proofs** | Key enforcement | Rejects when no public keys registered |
+| **PoI Proofs** | Node binding | `node_pubkey` field ties proof to specific node |
+| **PoI Proofs** | Freshness | 5-minute max age (configurable), prevents replay |
+| **PoI Proofs** | Key enforcement | Rejects when no public keys registered |
 | **RPC Messages** | Size limit | 256 MB bincode deserialization cap |
 | **Gossip Messages** | Size limit | 64 KB max before JSON parsing |
 | **Identity File** | Restricted perms | 0600 on Unix, warning on Windows |
@@ -714,8 +714,6 @@ Operators see what the network needs and choose specialist models accordingly.
 │  └──────────────────────────┬──────────────────────────┘   │
 │                             │                               │
 │  ┌──────────────────────────▼──────────────────────────┐   │
-│  │               llama-toploc (C++)                     │   │
-│  │  llama.cpp + BLAKE3 activation hashing + proof API  │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
@@ -757,7 +755,7 @@ Samhati/
 │   │       ├── network.rs          # iroh P2P: gossip thread, peer discovery
 │   │       ├── registry.rs         # Solana: fetch nodes, register, submit_round
 │   │       ├── settlement.rs       # Round payloads, local persist, Solana settle
-│   │       ├── node_runner.rs      # Spawns TOPLOC llama-server processes
+│   │       ├── node_runner.rs      # Spawns PoI llama-server processes
 │   │       ├── model_download.rs   # HuggingFace GGUF streaming download
 │   │       ├── wallet.rs           # Solana devnet wallet (balance, airdrop, txs)
 │   │       ├── api.rs              # HTTP client for inference API
@@ -780,7 +778,7 @@ Samhati/
 │   │       ├── swarm_planner.rs    # Layer-to-peer assignment
 │   │       ├── kv_cache.rs         # Layer-local KV cache with TTL
 │   │       └── tensor_frame.rs     # Typed tensor serialization (f32/f16)
-│   ├── samhati-toploc/             # TOPLOC proof system
+│   ├── samhati-toploc/             # PoI proof system
 │   │   └── src/
 │   │       ├── proof.rs            # ToplocProof struct + serialization
 │   │       ├── prover.rs           # Proof generation (BLAKE3 + Ed25519)
@@ -803,10 +801,6 @@ Samhati/
 │   ├── cluster-manager/            # Cluster constraints
 │   ├── model-config/               # Model config parsing
 │   └── shard-store/                # Content-addressed weight cache (BLAKE3)
-├── llama-toploc/                   # Patched llama.cpp
-│   ├── toploc-proof.h              # BLAKE3 activation hashing (~140 lines C++)
-│   ├── toploc.patch                # Diff to apply on llama.cpp
-│   └── build.sh                    # One command: clone → patch → build
 ├── programs/
 │   └── samhati-protocol/           # Solana Anchor program
 ├── sdk/
@@ -827,7 +821,7 @@ Samhati/
 |--------|-------|---------------|
 | Swarm inference | [Fortytwo (arXiv:2510.24801)](https://arxiv.org/abs/2510.24801) | LLM peer-ranking + BradleyTerry aggregation |
 | Multi-agent debate | [arXiv:2305.14325](https://arxiv.org/abs/2305.14325) | Debate round for hard queries (+12.8pp on math) |
-| Proof of compute | [TOPLOC (arXiv:2501.16007)](https://arxiv.org/abs/2501.16007) | Activation-level proofs in patched llama.cpp |
+| Proof of inference | Logprob-based PoI (inspired by PoI)(https://arxiv.org/abs/2501.16007) | Inspired our PoI — we use output logprobs instead of layer activations |
 | Agent diversity | [arXiv:2602.03794](https://arxiv.org/abs/2602.03794) | Use diverse models, not copies (2 diverse ≥ 16 same) |
 | Mixture of agents | [arXiv:2406.04692](https://arxiv.org/abs/2406.04692) | MoA-style refinement in debate round |
 | Adaptive routing | [RouteLLM (arXiv:2406.18665)](https://arxiv.org/abs/2406.18665) | Complexity classifier (Easy/Medium/Hard) |
@@ -841,13 +835,13 @@ Samhati/
 
 - Terminal UI with 5 tabs + browser WASM target (ratzilla)
 - 21 real models with HuggingFace downloads
-- llama-server auto-start (TOPLOC-enabled)
+- llama-server auto-start (PoI-enabled)
 - Swarm inference: fan-out → debate → LLM peer-rank → BradleyTerry
 - Complexity + domain classifiers with adaptive node count
 - ELO tracking + BradleyTerry ranking + SMTI rewards
-- Unified identity (one Ed25519 key for Solana + iroh + TOPLOC)
+- Unified identity (one Ed25519 key for Solana + iroh + PoI)
 - iroh P2P + gossip + NAT traversal + auto-mesh via Solana
-- TOPLOC proof system with node binding, freshness, calibration
+- PoI proof system with node binding, freshness, calibration
 - Solana Anchor program (5 instructions + domain counters)
 - Security hardening (constant-time auth, per-IP rate limit, gossip bounds, RPC limits)
 - Rust, Python, TypeScript SDKs + Tauri desktop app

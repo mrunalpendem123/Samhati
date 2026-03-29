@@ -1,7 +1,0 @@
-[
-  {"id": "node-a", "rtt_ms": 9.5},
-  {"id": "node-b", "rtt_ms": 14.2},
-  {"id": "node-c", "rtt_ms": 22.8},
-  {"id": "node-d", "rtt_ms": 34.0},
-  {"id": "node-e", "rtt_ms": 58.1}
-]

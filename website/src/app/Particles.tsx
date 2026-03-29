@@ -102,7 +102,7 @@ export default function Particles() {
       }},
 
       // 2: Model selected
-      { dur: 2100, main: "Your node picks a model — Qwen 3B fits in 4GB RAM.", sub: "llama.cpp starts. TOPLOC proofs enabled. You're live.", drawConn: false,  setup: () => {
+      { dur: 2100, main: "Your node picks a model — Qwen 3B fits in 4GB RAM.", sub: "llama.cpp starts. Proof of Inference enabled. You're live.", drawConn: false,  setup: () => {
         hideAll();
         for (let i = 0; i < 50; i++) {
           const a = (i/50) * Math.PI * 2;
@@ -186,7 +186,7 @@ export default function Particles() {
       }},
 
       // 8: Fan-out
-      { dur: 2600, main: "Fan-out → 3 Code specialist nodes.", sub: "Each runs llama.cpp + generates TOPLOC proof.", drawConn: false,  setup: () => {
+      { dur: 2600, main: "Fan-out → 3 Code specialist nodes.", sub: "Each runs llama.cpp + generates PoI proof.", drawConn: false,  setup: () => {
         hideAll();
         const pts = sphere(cx, cy, Math.min(w,h)*0.32, 250);
         for (let i = 5; i < 250; i++) set(i, pts[i][0], pts[i][1], 1, 0.08, ...B);

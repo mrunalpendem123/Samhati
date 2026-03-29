@@ -1,11 +1,21 @@
 /target
 /state
 **/*.rs.bk
-
 .DS_Store
+
+# Editor/tool configs
+.claude/
+.gstack/
+samhati-llama.cpp/
+
+# Build artifacts
 programs/target/
 app-frontend/node_modules/
 app-frontend/dist/
+website/node_modules/
+website/.next/
+website/dist/
+
+# Deprecated (using logprob-based PoI, no C++ patches needed)
 llama-toploc/llama.cpp/
 llama-toploc/bin/
-.gstack/
