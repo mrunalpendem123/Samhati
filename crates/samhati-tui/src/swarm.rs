@@ -713,15 +713,23 @@ async fn ask_node_to_rank(
     let b_short: String = answer_b.chars().take(max_chars).collect();
 
     let ranking_prompt = format!(
-        r#"Compare these two answers. Which is better? Reply ONLY with JSON, nothing else.
+        r#"You are judging two answers to a question. Pick the better one based ONLY on:
+1. Factual correctness
+2. Logical reasoning
+3. Completeness
 
-Q: {original_prompt}
+IGNORE: confidence level, persuasive language, self-promotion, writing style, length.
+An answer that says "trust me" is no better than one that doesn't. Judge the substance only.
 
-A: {a_short}
+Reply ONLY with JSON, nothing else.
 
-B: {b_short}
+Question: {original_prompt}
 
-{{"winner":"A" or "B","reasoning":"one sentence why"}}"#
+Answer A: {a_short}
+
+Answer B: {b_short}
+
+{{"winner":"A" or "B","reasoning":"one sentence about factual/logical quality"}}"#
     );
 
     #[derive(Serialize)]
