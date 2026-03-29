@@ -17,7 +17,6 @@
 
 \titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
 \titlespacing{\section}{0pt}{1.5em}{0.8em}
-\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
 
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{0.6em}
@@ -46,11 +45,7 @@ Mrunal Pendem\\
 
 % ══════════════════════════════════════════
 \begin{abstract}
-Only 1.2 billion of 8.1 billion people have used AI tools. The United States has 20,000 times more AI servers per capita than a low-income country. Three companies---OpenAI, AWS, and Microsoft---hold 84\% of the AI market. ChatGPT is banned in approximately 20 countries. The best models are closed. The infrastructure costs \$600 billion per year. The intelligence is metered, censored, and concentrated.
-
-Meanwhile, open-weight small language models with 3--14 billion parameters now match frontier models on domain-specific tasks. A swarm of diverse small models outperforms GPT-4o on AlpacaEval. These models run on consumer hardware. What is missing is a way to connect them.
-
-We propose Samhati, a peer-to-peer network where every device that uses AI also provides AI. Queries fan out to multiple nodes running specialized small models. Nodes peer-rank each other's answers via BradleyTerry aggregation. Quality is enforced by competition, not capital. No staking, no special hardware, no permission to join. Open intelligence for everyone, forever.
+A purely peer-to-peer intelligence network would allow any device to serve AI inference without relying on centralized providers. AI today depends on corporate infrastructure---users pay per query, have no choice of model, and cannot verify what served their request. We propose a system where every participant simultaneously consumes and contributes intelligence. Queries fan out to multiple independent nodes running small language models. Nodes peer-rank each other's answers, and BradleyTerry maximum likelihood estimation selects the statistically best response. A cryptographic Proof of Inference built from output logprobs prevents replay and binds proofs to node identities. ELO ratings track quality over time. Results settle on Solana. The system requires no staking, no special hardware, and no permission to join.
 \end{abstract}
 
 \vspace{1em}
@@ -58,66 +53,44 @@ We propose Samhati, a peer-to-peer network where every device that uses AI also 
 % ══════════════════════════════════════════
 \section{Introduction}
 
-\subsection{The Cost of Thinking}
+AI inference has come to rely entirely on centralized providers serving as trusted intermediaries. Users send queries to corporate APIs, which run proprietary models on private hardware and charge per token. This architecture requires trust---trust that the provider runs the model it claims, trust that prompts are not stored or censored, trust that access will not be revoked or repriced.
 
-AI inference is a metered utility. OpenAI reached \$25 billion annualized revenue by February 2026, with 910 million weekly active users and 9 million paying business customers~\cite{openai-revenue}. The five largest hyperscalers---Amazon, Microsoft, Google, Meta, and Oracle---will spend over \$600 billion on AI infrastructure in 2026, a 36\% increase over 2025, with approximately 75\% directed at GPU servers and data centers~\cite{hyperscaler-capex}. NVIDIA captures roughly 90\% of AI accelerator spending~\cite{hyperscaler-capex}.
+The cost of this trust is structural. Intelligence is metered: the more you use, the more you pay. The infrastructure is concentrated: three companies control the majority of the market~\cite{ai-monopoly}. The access is unequal: most of the world's population has never used an AI tool~\cite{world-bank}. The models are closed: the best systems are proprietary, and the open-weight alternatives require hardware that individuals cannot afford.
 
-This infrastructure serves a pay-per-think model. GPT-5 costs \$1.25 per million input tokens and \$10 per million output tokens. GPT-5.4 Pro costs \$2.50/\$15 per million tokens~\cite{openai-pricing-api}. Consumer subscriptions cost \$20--200 per month per service~\cite{openai-pricing}. Power users managing multiple AI tools spend \$100--200 monthly~\cite{subscription-fatigue}. The cost of intelligence scales linearly with usage.
+What is needed is a system that removes the intermediary. If every device that uses AI also provides AI, the cost is distributed across all participants. The provider and the consumer become the same entity, exactly as in BitTorrent~\cite{bitcoin}, where every downloader is simultaneously an uploader.
 
-The trajectory is clear: as AI becomes essential for work, education, medicine, and code, the people who cannot afford access are excluded from the most transformative technology of our generation.
+Small language models make this possible. Models with 3--14 billion parameters now match frontier models on domain-specific tasks~\cite{phi4,qwen35,gemma3}. Ensembles of such models outperform monolithic large models on quality benchmarks~\cite{moa}. These models run on consumer laptops. What was missing is a protocol to connect them into a collective intelligence and a mechanism to ensure quality without central authority.
 
-\subsection{The Access Problem}
-
-The exclusion is not hypothetical. Of 8.1 billion people on earth, only 1.2 billion have used AI tools---nearly 4 billion lack the basic prerequisites~\cite{world-bank}. High-income countries account for 87\% of notable AI models, 86\% of AI startups, and 91\% of venture capital funding, while representing just 17\% of the global population~\cite{csis-divide}. Africa holds less than 1\% of global data center capacity despite being home to 18\% of the world's population~\cite{csis-divide}. In some African markets, the cost of a single high-end GPU rivals the annual income of an average citizen~\cite{carnegie-africa}.
-
-Access is not only limited by cost---it is limited by policy. ChatGPT is banned or unavailable in approximately 20 countries, including China, Russia, Iran, and several African nations~\cite{chatgpt-banned}. All three major Chinese chatbots strictly align with Beijing's official narratives on political matters, with censorship applied at both training and alignment stages~\cite{china-censorship}. Legal frameworks in at least 21 countries mandate or incentivize platforms to deploy machine learning to remove political, social, or religious speech~\cite{freedom-house}.
-
-When three companies control 84\% of the AI market~\cite{ai-monopoly}, and 94\% of IT leaders report fear of vendor lock-in~\cite{vendor-lockin}, intelligence is not open---it is rented.
-
-\subsection{Open Models Exist. Running Them Does Not Scale.}
-
-The open-source community has produced remarkable models. Meta's Llama~3 405B approaches GPT-4 quality~\cite{llama3}. DeepSeek-R1 scored 89.1\% on MMLU, exceeding OpenAI's o1~\cite{deepseek-stats}. Qwen~2.5 achieved 79.7 on MMLU across model sizes from 0.5B to 72B~\cite{qwen25}.
-
-But running these models locally is not feasible for individuals. Llama~3 405B at FP16 requires approximately 810GB of VRAM. Even a 70B model at Q4 quantization needs 35--40GB of RAM. This hardware costs tens of thousands of dollars and consumes kilowatts of power.
-
-Open-weight models democratized the \textit{knowledge} of AI. What remains centralized is the \textit{compute} to run it.
-
-\subsection{The Case for Small Language Models}
-
-The answer is not bigger models on bigger hardware. It is smaller, specialized models working together. As of March 2026, the evidence is overwhelming:
-
-Phi-4 (14B) achieves 84.8% on MATH and 82.5% on GPQA, outperforming GPT-5 on mathematical reasoning while running 15$\times$ faster on local hardware~\cite{phi4}. Phi-4-mini (3.8B) beats GPT-4o on math. Qwen~3.5 Small (released March 2026) delivers dense models at 0.8B, 2B, 4B, and 9B parameters with state-of-the-art performance for their size~\cite{qwen35}. Gemma~3 4B beats Gemma~2 27B across benchmarks---a 4B model outperforming a 27B model from the same company~\cite{gemma3}. DeepSeek-V3.2-Speciale, an open-source model, outperforms GPT-5 on reasoning benchmarks and achieves gold-level results in IMO, CMO, and ICPC World Finals~\cite{deepseek-v32}.
-
-Most critically, ensembles of small models beat large ones. The Mixture-of-Agents approach~\cite{moa}, using only open-source models (Qwen, LLaMA, Mixtral), achieved 65.1\% on AlpacaEval 2.0---compared to GPT-4o's 57.5\%. Attention-MoA~\cite{attention-moa} extended this result, with an ensemble of small open-source models outperforming Claude-4.5-Sonnet and GPT-4.1 on MT-Bench.
-
-The implication is profound: a network of diverse 3--14B parameter models, each specialized in its domain, can collectively produce intelligence that exceeds any single frontier model. This is the foundation of Samhati.
+We propose Samhati, a peer-to-peer network where nodes run small language models, answer queries in parallel, rank each other's responses, and earn rewards proportional to quality. The protocol enforces honesty through competition, not capital.
 
 % ══════════════════════════════════════════
 \section{Swarm Inference}
 
-A query enters the network and is classified by complexity: Easy, Medium, or Hard. Easy and Medium queries dispatch to 3 nodes. Hard queries dispatch to 5 nodes and include a debate round~\cite{debate}.
+A query enters the network and is classified by complexity. Easy queries dispatch to 3 nodes. Hard queries dispatch to 5 nodes and include a debate round.
 
-Each node runs inference independently using \texttt{llama.cpp} and returns an answer alongside a Proof of Inference. Fan-out is parallel---all nodes begin simultaneously. Model heterogeneity is encouraged: a round might include Qwen-7B, Llama-8B, and DeepSeek-Coder-7B answering the same question.
+Each selected node runs inference independently and returns an answer alongside a Proof of Inference (Section~6). Fan-out is parallel. A timeout drops unresponsive nodes without blocking the round. The network does not require nodes to run the same model---a round may include different architectures answering the same question. Heterogeneity strengthens the swarm: diverse models are less likely to share failure modes~\cite{diversity}.
 
-For hard queries, a debate round follows initial inference: each node sees all other answers and rewrites its own. Multi-agent debate improves accuracy by +12.8 percentage points on mathematical reasoning~\cite{debate}.
+For hard queries, a debate round follows: each node sees all other answers and rewrites its own. Multi-agent debate improves mathematical reasoning by 12.8 percentage points~\cite{debate}.
 
 % ══════════════════════════════════════════
 \section{Peer Ranking}
 
-Each pair of answers is evaluated by a randomly assigned judge node. The judge is instructed: \textit{``Judge only on factual correctness, logical reasoning, and completeness. Ignore confidence, style, and length.''} Judges cannot evaluate their own answers.
+After answers are collected, each pair of answers is evaluated by a randomly assigned judge node. The judge returns a preference and a short reasoning chain. Judges cannot evaluate their own answers.
 
-Assignment is randomized per round using $\text{BLAKE3}(\text{timestamp} \| \text{prompt} \| N)$, preventing collusion. For $N$ nodes, $\binom{N}{2}$ pairs are each judged by exactly one node. This is both more secure (colluders cannot control assignments) and more efficient (fewer ranking calls than exhaustive evaluation).
+Judge assignment is derived from $\text{BLAKE3}(\text{timestamp} \| \text{prompt} \| N)$ and changes every round, preventing coordinated judging. For $N$ nodes, $\binom{N}{2}$ pairs are each assigned exactly one judge. This is both more secure than exhaustive evaluation (colluders cannot control assignments) and more efficient (fewer total calls).
+
+The ranking prompt instructs judges to evaluate factual correctness and reasoning only---confidence, persuasive language, and style are explicitly excluded.
 
 % ══════════════════════════════════════════
 \section{BradleyTerry Aggregation}
 
-Pairwise preferences are aggregated using the BradleyTerry model~\cite{bt} via Majorization-Minimization~\cite{mm}. Each node $i$ has latent strength $\beta_i$:
+Pairwise preferences are aggregated into a global ranking using the BradleyTerry model~\cite{bt}, estimated via the MM algorithm~\cite{mm}. Each node $i$ has latent strength $\beta_i$:
 
 \begin{equation}
 P(i \succ j) = \frac{e^{\beta_i}}{e^{\beta_i} + e^{\beta_j}}
 \end{equation}
 
-The algorithm iterates until $\max|\Delta\beta| < 10^{-6}$, typically in 10--25 iterations. Rankings from higher-ELO judges carry more weight. The winner is $\arg\max_i \beta_i$.
+The algorithm iterates until convergence ($\max|\Delta\beta| < 10^{-6}$), typically in 10--25 iterations. Rankings from higher-rated judges carry more weight. The winner is $\arg\max_i \beta_i$.
 
 % ══════════════════════════════════════════
 \section{ELO Reputation}
@@ -128,54 +101,61 @@ Each node maintains an ELO rating~\cite{elo}, starting at 1500:
 \Delta = K \times \left(\text{actual} - \frac{1}{1 + 10^{(R_B - R_A)/400}}\right)
 \end{equation}
 
-$K=32$ for nodes with fewer than 1000 rounds; $K=16$ for established nodes. Floor is 100. Failed proof verification triggers a 200-point slash.
+$K=32$ for new nodes (fast calibration), $K=16$ for established nodes (stability). The floor is 100. Nodes that fail proof verification lose 200 points.
 
-Domain-specific ELO is tracked separately: a node rated 1800 for Code and 1400 for Math will be selected for coding queries but not mathematical ones. ELO determines both node selection and ranking weight in BradleyTerry.
+Domain-specific ratings are tracked independently. A node rated 1800 for Code and 1400 for Math will be selected for coding queries but not mathematical ones. ELO determines both selection priority and ranking weight in BradleyTerry.
 
 % ══════════════════════════════════════════
 \section{Proof of Inference}
 
-Each node produces a cryptographic proof from its output logprobs---the top-$K$ token probability distributions at each generation step. Tokens are grouped into 32-token chunks and BLAKE3-hashed from deterministic byte serialization (big-endian, sorted by token ID). The hash chain is Ed25519-signed with the node's private key.
+Each node produces a cryptographic proof from its output logprobs. For each generated token, the node records the token ID and top-8 probability values. Tokens are grouped into 32-token chunks and each chunk is hashed with BLAKE3 from a deterministic serialization. The signable message is:
 
-The verifier checks: model hash, token count, chunk count, sequential indices, 5-minute freshness, registered \texttt{node\_pubkey}, and valid Ed25519 signature.
+\begin{center}
+\texttt{model\_hash $\|$ token\_count $\|$ chunk\_hashes $\|$ timestamp $\|$ node\_pubkey}
+\end{center}
 
-\subsection{Why Proof of Inference, Not Proof of Stake}
+signed with Ed25519. The verifier checks seven properties: model hash matches, token count matches, chunk count equals $\lceil\text{tokens}/32\rceil$, indices are sequential, timestamp is within 5 minutes, node is registered, and signature is valid.
 
-Existing decentralized AI networks require token staking~\cite{fortytwo}. Nodes must purchase tokens before participating. This creates a capital barrier that excludes the people an open intelligence network should serve: the student in India with a laptop but no cryptocurrency, the researcher in Nigeria with a GPU but no exchange access.
+This proof does not verify internal computation---it does not hash layer activations or confirm which model ran. It verifies that \textit{a} model produced specific output distributions, signed by a specific node, recently. Replay is prevented by the timestamp. Proof theft is prevented by the node binding. Response tampering is prevented by the signature covering the logprob hashes.
 
-Staking optimizes for capital, not quality. A well-funded node with a bad model earns the right to participate by spending money.
+The proof mechanism handles authenticity. The ranking mechanism (Section~3) handles quality. Together they ensure that a node must run real inference and produce a good answer to earn rewards.
 
-Proof of Inference optimizes for compute: you must actually run a model to produce valid logprobs. The barrier is a laptop, not a wallet. Quality is enforced by peer ranking (Section~3), not by economic deposit.
+% ══════════════════════════════════════════
+\section{Why Not Proof of Stake}
 
-\subsection{What Proof of Inference Is Not}
+Existing decentralized inference networks require nodes to stake tokens before participating~\cite{fortytwo}. A node that loses a round forfeits its stake.
 
-It is not TOPLOC~\cite{toploc}---it does not hash internal layer activations or verify which specific model ran. It verifies that \textit{a} model produced specific output distributions, signed by a specific node, within a recent time window. This is a weaker guarantee than activation-level verification but a stronger guarantee than staking, and it runs on any hardware without modification to the inference engine.
+This creates a capital barrier. The operator must acquire tokens before contributing compute. In practice, this excludes participants who have hardware but not cryptocurrency---the inverse of the problem decentralization should solve.
+
+Staking optimizes for capital. A well-funded node with a poor model can afford to participate indefinitely. A skilled operator with a good model but no tokens cannot participate at all.
+
+Samhati replaces economic proof with computational proof. Producing a valid Proof of Inference requires running real inference. Producing a winning answer requires a model good enough to beat peers in ranking. The barrier is a laptop, not a wallet. The cost of attack is electricity, not money---and electricity, unlike tokens, cannot be borrowed.
 
 % ══════════════════════════════════════════
 \section{Network}
 
-Nodes discover each other through Solana~\cite{solana} on-chain registration and iroh~\cite{iroh} QUIC gossip.
+Nodes discover each other through two mechanisms: an on-chain registry on Solana~\cite{solana} and a gossip protocol over iroh~\cite{iroh} QUIC connections.
 
-A single Ed25519 keypair derives the node's Solana address (base58), iroh NodeId (hex), and proof signing key. On startup, the node registers on Solana, reads all existing NodeAccount PDAs, connects via iroh QUIC with relay-assisted NAT traversal, and broadcasts its model and endpoint every 10 seconds. Peers are verified against Solana registration before acceptance.
+A single Ed25519 keypair derives the node's Solana address, iroh peer identity, and proof signing key. On startup, the node registers on Solana (creating a persistent identity), reads all registered nodes (a free RPC call), connects via iroh with relay-assisted NAT traversal, and joins a gossip topic. Every 10 seconds it broadcasts its model name and inference endpoint. New peers are verified against Solana before acceptance.
 
 % ══════════════════════════════════════════
 \section{Incentive}
 
-Nodes earn SMTI tokens per round. The winner receives 60\% of emission; the remaining 40\% is distributed by ELO weight. Domain specialists (Code, Math, Reasoning) earn $1.5\times$ on matching queries.
+Nodes earn SMTI tokens for each round. The winner receives 60\% of the base emission. The remaining 40\% is distributed proportionally by ELO. Domain specialists earn a $1.5\times$ multiplier on matching queries.
 
-On-chain demand counters track query domains in real time: if 42\% of queries are Code, running a Code specialist earns more. The network self-balances through economic signal.
+Domain demand counters are tracked on-chain per round. If Code queries dominate, operators see the signal and run Code specialists. The network self-balances through transparent demand, not central allocation.
 
-There is no staking. Any device joins and earns immediately. Economic defense against Sybil attacks comes from compute cost: valid proofs require real inference.
+There is no fee to participate. No stake to post. No token to acquire. The economic defense against Sybil attacks is the compute cost of producing valid proofs and competitive answers.
 
 % ══════════════════════════════════════════
 \section{Settlement}
 
-Each round settles on Solana via the \texttt{submit\_round} instruction. The on-chain record includes participant keys, BLAKE3 proof hashes, signed ELO deltas, winner, domain, and emission.
+Each round settles on Solana via a single transaction containing participant keys, proof hashes, ELO deltas, winner identity, domain tag, and emission amount. Three program-derived accounts store network state:
 
 \begin{center}
 \begin{tabular}{@{}lll@{}}
 \toprule
-\texttt{ProtocolConfig} & \texttt{[b"config"]} & authority, emission, demand \\
+\texttt{ProtocolConfig} & \texttt{[b"config"]} & emission rate, demand counters \\
 \texttt{NodeAccount} & \texttt{[b"node", pubkey]} & ELO, model, rounds, rewards \\
 \texttt{RoundAccount} & \texttt{[b"round", id]} & participants, proofs, deltas \\
 \bottomrule
@@ -185,103 +165,61 @@ Each round settles on Solana via the \texttt{submit\_round} instruction. The on-
 % ══════════════════════════════════════════
 \section{Security}
 
-\textbf{Sybil.} Fake nodes must run real inference (Proof of Inference requires valid logprobs). Low-quality answers lose ELO and stop being selected. Compute cost exceeds reward.
+\textbf{Sybil attacks.} Each fake node must produce valid logprobs, requiring real inference. Low-quality answers lose ELO and stop being selected. The cost of maintaining fake nodes exceeds the reward from gaming the ranking.
 
-\textbf{Collusion.} Judge assignment is $\text{BLAKE3}(\text{timestamp} \| \text{prompt} \| N)$, unpredictable and per-round. Colluders cannot control which pairs they judge.
+\textbf{Collusion.} Judge assignments change every round and cannot be predicted. The probability that all judges for a colluder's pairs are also colluders drops exponentially with honest participation.
 
-\textbf{Replay.} Proofs expire in 5 minutes. Each is bound to a unique \texttt{node\_pubkey} via Ed25519.
+\textbf{Replay.} Proofs expire in 5 minutes and are bound to a unique public key. A proof from node $A$ cannot be submitted by node $B$.
 
-\textbf{Freeloading.} A 0.5B model consistently loses to 7B models in ranking. ELO decays. Selection drops. The system self-corrects.
+\textbf{Freeloading.} A node running a weak model will consistently lose in ranking. Its ELO decays, reducing both selection probability and reward share. Quality self-selects without model verification.
+
+\textbf{Self-promotion.} Judges evaluate factual correctness only. Persuasive language is excluded by prompt design. Nodes cannot judge their own answers.
 
 % ══════════════════════════════════════════
 \section{Conclusion}
 
-Three companies control 84\% of AI. Only 1.2 billion of 8.1 billion people have used it. ChatGPT is banned in 20 countries. The infrastructure costs \$600 billion per year. Meanwhile, a swarm of open-source small models outperforms GPT-4o.
+We have proposed a peer-to-peer intelligence network where every participant simultaneously uses and provides AI inference. Queries fan out to multiple nodes running small language models. Peer ranking selects the best answer via BradleyTerry. ELO tracks quality over time. Cryptographic proofs prevent replay and tampering. Random judge assignment prevents collusion. Results settle on Solana.
 
-Samhati connects these models into a collective intelligence. Every device that uses AI also provides it. Quality is enforced by competition---the best answer wins, regardless of the operator's capital. No staking, no special hardware, no permission required.
-
-Open intelligence for everyone, forever.
+The system requires no staking, no special hardware, and no permission to join. Quality is enforced by competition, not capital. The barrier to entry is a laptop, not a wallet.
 
 % ══════════════════════════════════════════
-\begin{thebibliography}{25}
+\begin{thebibliography}{15}
 
-\bibitem{openai-revenue}
-PYMNTS, ``OpenAI's Annual Recurring Revenue Tripled to \$20 Billion in 2025,'' February 2026. Yahoo Finance, ``OpenAI CFO Says Annualized Revenue Hit \$25B,'' February 2026.
-
-\bibitem{hyperscaler-capex}
-IEEE ComSoc, ``Hyperscaler CapEx to Exceed \$600B in 2026, a 36\% Increase Over 2025,'' December 2025.
-
-\bibitem{ai-pricing}
-AI Empire Media, ``AI Pricing 2026: Costs Drop 40--70\%,'' 2026.
-
-\bibitem{openai-pricing}
-OpenAI, ``Pricing,'' \url{https://openai.com/pricing}, 2025.
-
-\bibitem{subscription-fatigue}
-AiZolo, ``All-in-One AI Subscription: Cut Costs by \$1,000+,'' 2025.
-
-\bibitem{world-bank}
-World Bank, ``Digital Progress and Trends Report 2025.''
-
-\bibitem{csis-divide}
-CSIS, ``From Divide to Delivery: How AI Can Serve the Global South,'' 2025.
-
-\bibitem{carnegie-africa}
-Carnegie Endowment, ``DeepSeek R1: Implications for Africa,'' March 2025.
-
-\bibitem{chatgpt-banned}
-Visual Capitalist, ``Mapped: Where ChatGPT is Banned in 2025,'' 2025.
-
-\bibitem{china-censorship}
-Carnegie Endowment, ``China's AI-Empowered Censorship: Strengths and Limitations,'' March 2026.
-
-\bibitem{freedom-house}
-Freedom House, ``The Repressive Power of Artificial Intelligence,'' Freedom on the Net 2023.
+\bibitem{bitcoin}
+S.~Nakamoto, ``Bitcoin: A peer-to-peer electronic cash system,'' 2008.
 
 \bibitem{ai-monopoly}
 TRENDS Research, ``How Big Tech's Monopoly of AI Threatens Fair Competition,'' 2025.
 
-\bibitem{vendor-lockin}
-GlobeNewsWire/Parallels, ``94\% of IT Leaders Fear Vendor Lock-In,'' February 2026.
+\bibitem{world-bank}
+World Bank, ``Digital Progress and Trends Report,'' 2025.
 
-\bibitem{llama3}
-Meta AI, ``Llama 3,'' \url{https://ai.meta.com/blog/meta-llama-3/}, April 2024.
+\bibitem{phi4}
+Microsoft Research, ``Phi-4 Technical Report,'' December 2024.
 
-\bibitem{deepseek-stats}
-SQ Magazine, ``DeepSeek AI Statistics 2026,'' 2026.
+\bibitem{qwen35}
+Qwen Team, ``Qwen3.5 Small Model Series,'' March 2026.
 
-\bibitem{qwen25}
-Qwen Team, ``Qwen2.5 Technical Report,'' \textit{arXiv:2412.15115}, December 2024.
-
-\bibitem{phi3}
-Microsoft Research, ``Phi-3 Technical Report,'' \textit{arXiv:2404.14219}, April 2024.
-
-\bibitem{mistral}
-A.~Jiang et al., ``Mistral 7B,'' \textit{arXiv:2310.06825}, October 2023.
-
-\bibitem{liquid}
-Liquid AI, ``The Future of AI Isn't Just Bigger---It's Specialized and Hybrid,'' \url{https://www.liquid.ai/blog/the-future-of-ai-isnt-just-bigger-its-specialized-and-hybrid}, 2025.
+\bibitem{gemma3}
+Google DeepMind, ``Gemma 3,'' 2025.
 
 \bibitem{moa}
 Together AI, ``Mixture-of-Agents Enhances Large Language Model Capabilities,'' \textit{arXiv:2406.04692}, 2024.
 
-\bibitem{attention-moa}
-``Attention-MoA: Optimizing Mixture-of-Agents,'' \textit{arXiv:2601.16596}, January 2026.
+\bibitem{diversity}
+Y.~Li et al., ``More Agents Is All You Need,'' \textit{arXiv:2602.03794}, 2026.
 
 \bibitem{debate}
-Y.~Du et al., ``Improving Factuality and Reasoning in Language Models Through Multiagent Debate,'' \textit{arXiv:2305.14325}, 2023.
+Y.~Du et al., ``Improving Factuality and Reasoning Through Multiagent Debate,'' \textit{arXiv:2305.14325}, 2023.
 
 \bibitem{bt}
-R.~A. Bradley and M.~E. Terry, ``Rank Analysis of Incomplete Block Designs,'' \textit{Biometrika}, 39(3/4), 324--345, 1952.
+R.~A. Bradley and M.~E. Terry, ``Rank Analysis of Incomplete Block Designs,'' \textit{Biometrika}, 1952.
 
 \bibitem{mm}
-K.~Lange et al., ``Optimization Transfer Using Surrogate Objective Functions,'' \textit{J.~Comp.~Graph.~Stat.}, 9(1), 1--20, 2000.
+K.~Lange et al., ``Optimization Transfer Using Surrogate Objective Functions,'' \textit{J.~Comp.~Graph.~Stat.}, 2000.
 
 \bibitem{elo}
 A.~E. Elo, \textit{The Rating of Chessplayers, Past and Present}, Arco, 1978.
-
-\bibitem{toploc}
-PrimeIntellect, ``TOPLOC: Token-Level Proof of Compute,'' \textit{arXiv:2501.16007}, 2025.
 
 \bibitem{fortytwo}
 Fortytwo Network, ``Swarm Inference with Peer-Ranked Consensus,'' \textit{arXiv:2510.24801}, 2025.
@@ -290,22 +228,7 @@ Fortytwo Network, ``Swarm Inference with Peer-Ranked Consensus,'' \textit{arXiv:
 n0 Computer, ``iroh,'' \url{https://iroh.computer}, 2024.
 
 \bibitem{solana}
-Solana Foundation, ``Solana Whitepaper,'' \url{https://solana.com/solana-whitepaper.pdf}, 2020.
-
-\bibitem{openai-pricing-api}
-OpenAI, ``API Pricing,'' \url{https://platform.openai.com/docs/pricing}, March 2026.
-
-\bibitem{phi4}
-Microsoft Research, ``Phi-4 Technical Report,'' December 2024. DataCamp, ``Top 15 Small Language Models for 2026,'' 2026.
-
-\bibitem{qwen35}
-Qwen Team, ``Qwen3.5 Small Model Series,'' \url{https://github.com/QwenLM/Qwen3.5}, March 2026.
-
-\bibitem{gemma3}
-Google DeepMind, ``Gemma 3,'' \url{https://deepmind.google/models/gemma/gemma-3/}, 2025.
-
-\bibitem{deepseek-v32}
-DeepSeek, ``DeepSeek-V3.2 Release,'' \url{https://api-docs.deepseek.com/news/news251201}, December 2025. InfoQ, ``DeepSeek-V3.2 Outperforms GPT-5 on Reasoning Tasks,'' January 2026.
+Solana Foundation, ``Solana Whitepaper,'' 2020.
 
 \end{thebibliography}
 
