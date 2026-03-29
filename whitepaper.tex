@@ -60,9 +60,9 @@ We propose Samhati, a peer-to-peer network where every device that uses AI also 
 
 \subsection{The Cost of Thinking}
 
-AI inference is a metered utility. OpenAI generated \$20 billion in annual recurring revenue in 2025, tripling from the prior year~\cite{openai-revenue}. The five largest hyperscalers---Amazon, Microsoft, Google, Meta, and Oracle---will spend over \$600 billion on AI infrastructure in 2026, a 36\% increase over 2025, with approximately 75\% directed at GPU servers and data centers~\cite{hyperscaler-capex}. NVIDIA captures roughly 90\% of AI accelerator spending~\cite{hyperscaler-capex}.
+AI inference is a metered utility. OpenAI reached \$25 billion annualized revenue by February 2026, with 910 million weekly active users and 9 million paying business customers~\cite{openai-revenue}. The five largest hyperscalers---Amazon, Microsoft, Google, Meta, and Oracle---will spend over \$600 billion on AI infrastructure in 2026, a 36\% increase over 2025, with approximately 75\% directed at GPU servers and data centers~\cite{hyperscaler-capex}. NVIDIA captures roughly 90\% of AI accelerator spending~\cite{hyperscaler-capex}.
 
-This infrastructure serves a pay-per-think model. API costs for frontier models range from \$3 to \$168 per million output tokens~\cite{ai-pricing}. Consumer subscriptions cost \$20--200 per month per service~\cite{openai-pricing}. Power users managing multiple AI tools spend \$100--200 monthly~\cite{subscription-fatigue}. The cost of intelligence scales linearly with usage.
+This infrastructure serves a pay-per-think model. GPT-5 costs \$1.25 per million input tokens and \$10 per million output tokens. GPT-5.4 Pro costs \$2.50/\$15 per million tokens~\cite{openai-pricing-api}. Consumer subscriptions cost \$20--200 per month per service~\cite{openai-pricing}. Power users managing multiple AI tools spend \$100--200 monthly~\cite{subscription-fatigue}. The cost of intelligence scales linearly with usage.
 
 The trajectory is clear: as AI becomes essential for work, education, medicine, and code, the people who cannot afford access are excluded from the most transformative technology of our generation.
 
@@ -84,9 +84,9 @@ Open-weight models democratized the \textit{knowledge} of AI. What remains centr
 
 \subsection{The Case for Small Language Models}
 
-The answer is not bigger models on bigger hardware. It is smaller, specialized models working together.
+The answer is not bigger models on bigger hardware. It is smaller, specialized models working together. As of March 2026, the evidence is overwhelming:
 
-Microsoft Phi-3-small (7B parameters) outperforms GPT-3.5-Turbo across language, reasoning, coding, and math benchmarks~\cite{phi3}. Mistral~7B outperformed Llama~2 13B on every benchmark at launch~\cite{mistral}. Liquid AI's foundation models, built on continuous-time dynamical systems rather than transformers, outperform models of similar and larger size~\cite{liquid}.
+Phi-4 (14B) achieves 84.8% on MATH and 82.5% on GPQA, outperforming GPT-5 on mathematical reasoning while running 15$\times$ faster on local hardware~\cite{phi4}. Phi-4-mini (3.8B) beats GPT-4o on math. Qwen~3.5 Small (released March 2026) delivers dense models at 0.8B, 2B, 4B, and 9B parameters with state-of-the-art performance for their size~\cite{qwen35}. Gemma~3 4B beats Gemma~2 27B across benchmarks---a 4B model outperforming a 27B model from the same company~\cite{gemma3}. DeepSeek-V3.2-Speciale, an open-source model, outperforms GPT-5 on reasoning benchmarks and achieves gold-level results in IMO, CMO, and ICPC World Finals~\cite{deepseek-v32}.
 
 Most critically, ensembles of small models beat large ones. The Mixture-of-Agents approach~\cite{moa}, using only open-source models (Qwen, LLaMA, Mixtral), achieved 65.1\% on AlpacaEval 2.0---compared to GPT-4o's 57.5\%. Attention-MoA~\cite{attention-moa} extended this result, with an ensemble of small open-source models outperforming Claude-4.5-Sonnet and GPT-4.1 on MT-Bench.
 
@@ -206,7 +206,7 @@ Open intelligence for everyone, forever.
 \begin{thebibliography}{25}
 
 \bibitem{openai-revenue}
-PYMNTS, ``OpenAI's Annual Recurring Revenue Tripled to \$20 Billion in 2025,'' February 2026.
+PYMNTS, ``OpenAI's Annual Recurring Revenue Tripled to \$20 Billion in 2025,'' February 2026. Yahoo Finance, ``OpenAI CFO Says Annualized Revenue Hit \$25B,'' February 2026.
 
 \bibitem{hyperscaler-capex}
 IEEE ComSoc, ``Hyperscaler CapEx to Exceed \$600B in 2026, a 36\% Increase Over 2025,'' December 2025.
@@ -291,6 +291,21 @@ n0 Computer, ``iroh,'' \url{https://iroh.computer}, 2024.
 
 \bibitem{solana}
 Solana Foundation, ``Solana Whitepaper,'' \url{https://solana.com/solana-whitepaper.pdf}, 2020.
+
+\bibitem{openai-pricing-api}
+OpenAI, ``API Pricing,'' \url{https://platform.openai.com/docs/pricing}, March 2026.
+
+\bibitem{phi4}
+Microsoft Research, ``Phi-4 Technical Report,'' December 2024. DataCamp, ``Top 15 Small Language Models for 2026,'' 2026.
+
+\bibitem{qwen35}
+Qwen Team, ``Qwen3.5 Small Model Series,'' \url{https://github.com/QwenLM/Qwen3.5}, March 2026.
+
+\bibitem{gemma3}
+Google DeepMind, ``Gemma 3,'' \url{https://deepmind.google/models/gemma/gemma-3/}, 2025.
+
+\bibitem{deepseek-v32}
+DeepSeek, ``DeepSeek-V3.2 Release,'' \url{https://api-docs.deepseek.com/news/news251201}, December 2025. InfoQ, ``DeepSeek-V3.2 Outperforms GPT-5 on Reasoning Tasks,'' January 2026.
 
 \end{thebibliography}
 
