@@ -45,7 +45,7 @@ Akihiko Das\\
 
 % ══════════════════════════════════════════
 \begin{abstract}
-A purely peer-to-peer intelligence network would allow any device to serve AI inference without relying on centralized providers. AI today depends on corporate infrastructure---users pay per query, have no choice of model, and cannot verify what served their request. We propose a system where every participant simultaneously consumes and contributes intelligence. Queries fan out to multiple independent nodes running small language models. Nodes peer-rank each other's answers, and BradleyTerry maximum likelihood estimation selects the statistically best response. A cryptographic Proof of Inference built from output logprobs prevents replay and binds proofs to node identities. A dual-track EMA reputation system tracks both answer quality and ranking honesty, with Bayesian uncertainty and adaptive validation rates. Results settle on Solana. The system requires no staking, no special hardware, and no permission to join.
+A purely peer-to-peer intelligence network would allow any device to serve AI inference without relying on centralized providers. AI today depends on corporate infrastructure--users pay per query, have no choice of model, and cannot verify what served their request. We propose a system where every participant simultaneously consumes and contributes intelligence. Queries fan out to multiple independent nodes running small language models. Nodes peer-rank each other's answers, and BradleyTerry maximum likelihood estimation selects the statistically best response. A cryptographic Proof of Inference built from output logprobs prevents replay and binds proofs to node identities. A dual-track EMA reputation system tracks both answer quality and ranking honesty, with Bayesian uncertainty and adaptive validation rates. Results settle on Solana. The system requires no staking, no special hardware, and no permission to join.
 \end{abstract}
 
 \vspace{1em}
@@ -53,7 +53,7 @@ A purely peer-to-peer intelligence network would allow any device to serve AI in
 % ══════════════════════════════════════════
 \section{Introduction}
 
-AI inference has come to rely entirely on centralized providers serving as trusted intermediaries. Users send queries to corporate APIs, which run proprietary models on private hardware and charge per token. This architecture requires trust---trust that the provider runs the model it claims, trust that prompts are not stored or censored, trust that access will not be revoked or repriced.
+AI inference has come to rely entirely on centralized providers serving as trusted intermediaries. Users send queries to corporate APIs, which run proprietary models on private hardware and charge per token. This architecture requires trust--trust that the provider runs the model it claims, trust that prompts are not stored or censored, trust that access will not be revoked or repriced.
 
 The cost of this trust is structural. Intelligence is metered: the more you use, the more you pay. The infrastructure is concentrated: three companies control the majority of the market~\cite{ai-monopoly}. The access is unequal: most of the world's population has never used an AI tool~\cite{world-bank}. The models are closed: the best systems are proprietary, and the open-weight alternatives require hardware that individuals cannot afford.
 
@@ -68,7 +68,7 @@ We propose Samhati, a peer-to-peer network where nodes run small language models
 
 A query enters the network and is classified by complexity. Easy queries dispatch to 3 nodes. Hard queries dispatch to 5 nodes and include a debate round.
 
-Each selected node runs inference independently and returns an answer alongside a Proof of Inference (Section~6). Fan-out is parallel. A timeout drops unresponsive nodes without blocking the round. The network does not require nodes to run the same model---a round may include different architectures answering the same question. Heterogeneity strengthens the swarm: diverse models are less likely to share failure modes~\cite{diversity}.
+Each selected node runs inference independently and returns an answer alongside a Proof of Inference (Section~6). Fan-out is parallel. A timeout drops unresponsive nodes without blocking the round. The network does not require nodes to run the same model--a round may include different architectures answering the same question. Heterogeneity strengthens the swarm: diverse models are less likely to share failure modes~\cite{diversity}.
 
 For hard queries, a debate round follows: each node sees all other answers and rewrites its own. Multi-agent debate improves mathematical reasoning by 12.8 percentage points~\cite{debate}.
 
@@ -79,7 +79,7 @@ After answers are collected, each pair of answers is evaluated by a randomly ass
 
 Judge assignment is derived from $\text{BLAKE3}(\text{timestamp} \| \text{prompt} \| N)$ and changes every round, preventing coordinated judging. For $N$ nodes, $\binom{N}{2}$ pairs are each assigned exactly one judge. This is both more secure than exhaustive evaluation (colluders cannot control assignments) and more efficient (fewer total calls).
 
-The ranking prompt instructs judges to evaluate factual correctness and reasoning only---confidence, persuasive language, and style are explicitly excluded.
+The ranking prompt instructs judges to evaluate factual correctness and reasoning only--confidence, persuasive language, and style are explicitly excluded.
 
 % ══════════════════════════════════════════
 \section{BradleyTerry Aggregation}
@@ -107,7 +107,7 @@ $R_{\text{generation}}$ measures answer quality: did this node's answer win? Upd
 R_{\text{gen}}^{(t+1)} = (1 - \beta) \cdot R_{\text{gen}}^{(t)} + \beta \cdot \mathbb{1}[\text{won}], \quad \beta = 0.15
 \end{equation}
 
-$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly---a failure mode that single-track rating systems cannot detect.
+$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly--a failure mode that single-track rating systems cannot detect.
 
 Each node also carries an uncertainty $\sigma$, starting at 0.4 and decaying by 5\% per round to a minimum of 0.05. High uncertainty means we do not yet trust this node's rating. This is inspired by TrueSkill's Bayesian treatment of skill~\cite{trueskill}, applied here to reputation rather than game skill.
 
@@ -117,7 +117,7 @@ Uncertainty feeds an adaptive validation rate. New nodes with high $\sigma$ are 
 v = v_{\max} - (v_{\max} - v_{\min}) \cdot R \cdot (1 - \sigma), \quad v_{\max} = 0.5, \; v_{\min} = 0.02
 \end{equation}
 
-This reduces verification cost by an order of magnitude without sacrificing security---an approach demonstrated by Hyperbolic's Proof of Sampling protocol~\cite{posp}.
+This reduces verification cost by an order of magnitude without sacrificing security--an approach demonstrated by Hyperbolic's Proof of Sampling protocol~\cite{posp}.
 
 Domain-specific $R_{\text{generation}}$ is tracked independently for Code, Math, Reasoning, and General. A node strong in Code but weak in Math will be selected for coding queries but not mathematical ones.
 
@@ -134,7 +134,7 @@ Each node produces a cryptographic proof from its output logprobs. For each gene
 
 signed with Ed25519. The verifier checks seven properties: model hash matches, token count matches, chunk count equals $\lceil\text{tokens}/32\rceil$, indices are sequential, timestamp is within 5 minutes, node is registered, and signature is valid.
 
-This proof does not verify internal computation---it does not hash layer activations or confirm which model ran. It verifies that \textit{a} model produced specific output distributions, signed by a specific node, recently. Replay is prevented by the timestamp. Proof theft is prevented by the node binding. Response tampering is prevented by the signature covering the logprob hashes.
+This proof does not verify internal computation--it does not hash layer activations or confirm which model ran. It verifies that \textit{a} model produced specific output distributions, signed by a specific node, recently. Replay is prevented by the timestamp. Proof theft is prevented by the node binding. Response tampering is prevented by the signature covering the logprob hashes.
 
 The proof mechanism handles authenticity. The ranking mechanism (Section~3) handles quality. Together they ensure that a node must run real inference and produce a good answer to earn rewards.
 
@@ -143,11 +143,11 @@ The proof mechanism handles authenticity. The ranking mechanism (Section~3) hand
 
 Existing decentralized inference networks require nodes to stake tokens before participating~\cite{fortytwo}. A node that loses a round forfeits its stake.
 
-This creates a capital barrier. The operator must acquire tokens before contributing compute. In practice, this excludes participants who have hardware but not cryptocurrency---the inverse of the problem decentralization should solve.
+This creates a capital barrier. The operator must acquire tokens before contributing compute. In practice, this excludes participants who have hardware but not cryptocurrency--the inverse of the problem decentralization should solve.
 
 Staking optimizes for capital. A well-funded node with a poor model can afford to participate indefinitely. A skilled operator with a good model but no tokens cannot participate at all.
 
-Samhati replaces economic proof with computational proof. Producing a valid Proof of Inference requires running real inference. Producing a winning answer requires a model good enough to beat peers in ranking. The barrier is a laptop, not a wallet. The cost of attack is electricity, not money---and electricity, unlike tokens, cannot be borrowed.
+Samhati replaces economic proof with computational proof. Producing a valid Proof of Inference requires running real inference. Producing a winning answer requires a model good enough to beat peers in ranking. The barrier is a laptop, not a wallet. The cost of attack is electricity, not money--and electricity, unlike tokens, cannot be borrowed.
 
 % ══════════════════════════════════════════
 \section{Network}
