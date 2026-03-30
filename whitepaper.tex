@@ -33,9 +33,9 @@
 
 \vspace{1em}
 
-Mrunal Pendem\\
+Akihiko Das\\
 \texttt{samhati@proton.me}\\
-\url{https://github.com/mrunalpendem123/Samhati}
+\url{https://samhati.network}
 
 \vspace{0.5em}
 \textit{March 2026}
@@ -107,7 +107,7 @@ $R_{\text{generation}}$ measures answer quality: did this node's answer win? Upd
 R_{\text{gen}}^{(t+1)} = (1 - \beta) \cdot R_{\text{gen}}^{(t)} + \beta \cdot \mathbb{1}[\text{won}], \quad \beta = 0.15
 \end{equation}
 
-$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly---a failure mode that single-track systems like ELO~\cite{elo} cannot detect.
+$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly---a failure mode that single-track rating systems cannot detect.
 
 Each node also carries an uncertainty $\sigma$, starting at 0.4 and decaying by 5\% per round to a minimum of 0.05. High uncertainty means we do not yet trust this node's rating. This is inspired by TrueSkill's Bayesian treatment of skill~\cite{trueskill}, applied here to reputation rather than game skill.
 
@@ -159,7 +159,7 @@ A single Ed25519 keypair derives the node's Solana address, iroh peer identity, 
 % ══════════════════════════════════════════
 \section{Incentive}
 
-Nodes earn SMTI tokens for each round. The winner receives 60\% of the base emission. The remaining 40\% is distributed proportionally by ELO. Domain specialists earn a $1.5\times$ multiplier on matching queries.
+Nodes earn SMTI tokens for each round. The winner receives 60\% of the base emission. The remaining 40\% is distributed proportionally by reputation score. Domain specialists earn a $1.5\times$ multiplier on matching queries.
 
 Domain demand counters are tracked on-chain per round. If Code queries dominate, operators see the signal and run Code specialists. The network self-balances through transparent demand, not central allocation.
 
@@ -168,13 +168,13 @@ There is no fee to participate. No stake to post. No token to acquire. The econo
 % ══════════════════════════════════════════
 \section{Settlement}
 
-Each round settles on Solana via a single transaction containing participant keys, proof hashes, ELO deltas, winner identity, domain tag, and emission amount. Three program-derived accounts store network state:
+Each round settles on Solana via a single transaction containing participant keys, proof hashes, reputation deltas, winner identity, domain tag, and emission amount. Three program-derived accounts store network state:
 
 \begin{center}
 \begin{tabular}{@{}lll@{}}
 \toprule
 \texttt{ProtocolConfig} & \texttt{[b"config"]} & emission rate, demand counters \\
-\texttt{NodeAccount} & \texttt{[b"node", pubkey]} & ELO, model, rounds, rewards \\
+\texttt{NodeAccount} & \texttt{[b"node", pubkey]} & reputation, model, rounds, rewards \\
 \texttt{RoundAccount} & \texttt{[b"round", id]} & participants, proofs, deltas \\
 \bottomrule
 \end{tabular}
@@ -183,7 +183,7 @@ Each round settles on Solana via a single transaction containing participant key
 % ══════════════════════════════════════════
 \section{Security}
 
-\textbf{Sybil attacks.} Each fake node must produce valid logprobs, requiring real inference. Low-quality answers lose ELO and stop being selected. The cost of maintaining fake nodes exceeds the reward from gaming the ranking.
+\textbf{Sybil attacks.} Each fake node must produce valid logprobs, requiring real inference. Low-quality answers lose reputation and stop being selected. The cost of maintaining fake nodes exceeds the reward from gaming the ranking.
 
 \textbf{Collusion.} Judge assignments change every round and cannot be predicted. The probability that all judges for a colluder's pairs are also colluders drops exponentially with honest participation.
 
@@ -236,8 +236,8 @@ R.~A. Bradley and M.~E. Terry, ``Rank Analysis of Incomplete Block Designs,'' \t
 \bibitem{mm}
 K.~Lange et al., ``Optimization Transfer Using Surrogate Objective Functions,'' \textit{J.~Comp.~Graph.~Stat.}, 2000.
 
-\bibitem{elo}
-A.~E. Elo, \textit{The Rating of Chessplayers, Past and Present}, Arco, 1978.
+\bibitem{elo-historical}
+A.~E. Elo, \textit{The Rating of Chessplayers, Past and Present}, Arco, 1978. (Historical reference for single-track rating systems.)
 
 \bibitem{fortytwo}
 Fortytwo Network, ``Swarm Inference with Peer-Ranked Consensus,'' \textit{arXiv:2510.24801}, 2025.
