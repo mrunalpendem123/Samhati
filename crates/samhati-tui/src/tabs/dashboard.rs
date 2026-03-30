@@ -43,7 +43,7 @@ fn draw_elo_section(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "ELO Rating",
+            "Reputation",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -65,7 +65,7 @@ fn draw_elo_section(frame: &mut Frame, app: &App, area: Rect) {
     // Sparkline for ELO history
     let spark_block = Block::bordered()
         .title(Span::styled(
-            " ELO History ",
+            "  Rep History ",
             Style::default().fg(PURPLE).bold(),
         ))
         .border_style(Style::default().fg(DIM_PURPLE))
@@ -191,7 +191,7 @@ fn draw_swarm_nodes(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Node ID").style(Style::default().fg(PURPLE).bold()),
         Cell::from("Model").style(Style::default().fg(PURPLE).bold()),
-        Cell::from("ELO").style(Style::default().fg(PURPLE).bold()),
+        Cell::from("Rep").style(Style::default().fg(PURPLE).bold()),
         Cell::from("Rounds").style(Style::default().fg(PURPLE).bold()),
         Cell::from("Wins").style(Style::default().fg(PURPLE).bold()),
         Cell::from("Win %").style(Style::default().fg(PURPLE).bold()),

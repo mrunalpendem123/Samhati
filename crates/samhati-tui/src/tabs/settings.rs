@@ -111,7 +111,7 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(app.format_uptime(), Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("  ELO Score:       ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Reputation:       ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("{}", app.elo_score),
                 Style::default().fg(PURPLE).bold(),

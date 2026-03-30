@@ -83,7 +83,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let status = Line::from(vec![
         Span::styled(format!(" {} ", node_dot), Style::default().fg(node_color)),
         Span::styled(
-            format!("ELO:{}", app.elo_score),
+            format!("Rep:{:.0}", app.elo_score as f64 / 20.0),
             Style::default().fg(PURPLE).bold(),
         ),
         Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
