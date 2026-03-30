@@ -38,52 +38,35 @@ pub fn build_payload(
     round_counter: u64,
     our_pubkey: &str,
 ) -> RoundPayload {
-    // Map node IDs to Solana pubkeys.
-    // Local nodes (started via 's' key) use our pubkey since they share our identity.
-    // Remote nodes (from gossip) carry their Solana pubkey from the announcement.
-    let participants: Vec<String> = result
-        .all_answers
-        .iter()
-        .map(|a| {
-            // If it looks like a base58 Solana pubkey (32+ chars, no dashes), use it directly
-            if a.node_id.len() >= 32 && !a.node_id.contains('-') && !a.node_id.contains(':') {
-                a.node_id.clone()
-            } else {
-                // Local node — use our pubkey
-                our_pubkey.to_string()
-            }
-        })
-        .collect();
+    // Map node IDs to Solana pubkeys and DEDUPLICATE.
+    // Solana can't borrow the same account twice in one instruction.
+    // Local nodes all share our pubkey, so we collapse them into one entry.
+    use std::collections::HashMap;
+    let mut deduped: HashMap<String, ([u8; 32], i32)> = HashMap::new();
 
-    // Compute reputation deltas from the updates (current - 1500 baseline)
-    let elo_deltas: Vec<i32> = result
-        .elo_updates
-        .iter()
-        .map(|(_, elo)| *elo - 1500)
-        .collect();
+    for (i, answer) in result.all_answers.iter().enumerate() {
+        let pubkey = if answer.node_id.len() >= 32
+            && !answer.node_id.contains('-')
+            && !answer.node_id.contains(':')
+        {
+            answer.node_id.clone()
+        } else {
+            our_pubkey.to_string()
+        };
 
-    // Ensure arrays match in length (Solana program requires this)
-    let n = participants.len();
-    let proof_hashes = if result.proof_hashes.len() == n {
-        result.proof_hashes.clone()
-    } else {
-        // Pad or truncate to match participant count
-        let mut ph = result.proof_hashes.clone();
-        ph.resize(n, [0u8; 32]);
-        ph
-    };
-    let elo_deltas = if elo_deltas.len() == n {
-        elo_deltas
-    } else {
-        let mut ed = elo_deltas;
-        ed.resize(n, 0);
-        ed
-    };
+        let proof = result.proof_hashes.get(i).copied().unwrap_or([0u8; 32]);
+        let delta = result.elo_updates.get(i).map(|(_, e)| *e - 1500).unwrap_or(0);
+
+        deduped.entry(pubkey).or_insert((proof, delta));
+    }
+
+    let participants: Vec<String> = deduped.keys().cloned().collect();
+    let proof_hashes: Vec<[u8; 32]> = participants.iter().map(|p| deduped[p].0).collect();
+    let elo_deltas: Vec<i32> = participants.iter().map(|p| deduped[p].1).collect();
 
     let winner = if participants.contains(&result.winner_id) {
         result.winner_id.clone()
     } else {
-        // Winner ID is a local name — map to our pubkey
         our_pubkey.to_string()
     };
 
