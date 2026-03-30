@@ -700,7 +700,7 @@ fn check_swarm(
 
                     // Settle round: save locally
                     let round_id = settlement::next_round_id();
-                    let payload = settlement::build_payload(&result, round_id);
+                    let payload = settlement::build_payload(&result, round_id, &app.wallet_pubkey);
                     let _ = settlement::save_pending(&payload);
                     app.pending_settlement = Some(payload);
 

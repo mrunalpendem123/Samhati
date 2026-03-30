@@ -31,32 +31,69 @@ pub fn domain_to_u64(domain: &str) -> u64 {
 }
 
 /// Build a RoundPayload from swarm round results.
+/// `our_pubkey` is used as the Solana address for local nodes that don't
+/// have their own on-chain identity (nodes started via 's' key on same machine).
 pub fn build_payload(
     result: &crate::swarm::SwarmRoundResult,
     round_counter: u64,
+    our_pubkey: &str,
 ) -> RoundPayload {
-    // For now, node IDs are local identifiers (e.g. "node-8001").
-    // In production, these would be Solana pubkeys from the gossip announcements.
+    // Map node IDs to Solana pubkeys.
+    // Local nodes (started via 's' key) use our pubkey since they share our identity.
+    // Remote nodes (from gossip) carry their Solana pubkey from the announcement.
     let participants: Vec<String> = result
         .all_answers
         .iter()
-        .map(|a| a.node_id.clone())
+        .map(|a| {
+            // If it looks like a base58 Solana pubkey (32+ chars, no dashes), use it directly
+            if a.node_id.len() >= 32 && !a.node_id.contains('-') && !a.node_id.contains(':') {
+                a.node_id.clone()
+            } else {
+                // Local node — use our pubkey
+                our_pubkey.to_string()
+            }
+        })
         .collect();
 
-    // Compute ELO deltas from the updates (current - 1500 baseline)
+    // Compute reputation deltas from the updates (current - 1500 baseline)
     let elo_deltas: Vec<i32> = result
         .elo_updates
         .iter()
-        .map(|(_, elo)| *elo - 1500) // delta from initial
+        .map(|(_, elo)| *elo - 1500)
         .collect();
+
+    // Ensure arrays match in length (Solana program requires this)
+    let n = participants.len();
+    let proof_hashes = if result.proof_hashes.len() == n {
+        result.proof_hashes.clone()
+    } else {
+        // Pad or truncate to match participant count
+        let mut ph = result.proof_hashes.clone();
+        ph.resize(n, [0u8; 32]);
+        ph
+    };
+    let elo_deltas = if elo_deltas.len() == n {
+        elo_deltas
+    } else {
+        let mut ed = elo_deltas;
+        ed.resize(n, 0);
+        ed
+    };
+
+    let winner = if participants.contains(&result.winner_id) {
+        result.winner_id.clone()
+    } else {
+        // Winner ID is a local name — map to our pubkey
+        our_pubkey.to_string()
+    };
 
     RoundPayload {
         round_id: round_counter,
         participants,
-        proof_hashes: result.proof_hashes.clone(),
+        proof_hashes,
         elo_deltas,
-        winner: result.winner_id.clone(),
-        smti_emitted: 1000, // base emission per round
+        winner,
+        smti_emitted: 1000,
         domain: domain_to_u64(&result.domain),
         timestamp: chrono::Utc::now().timestamp(),
     }
