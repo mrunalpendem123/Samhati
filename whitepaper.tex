@@ -98,16 +98,16 @@ The algorithm iterates until convergence ($\max|\Delta\beta| < 10^{-6}$), typica
 Each node maintains a reputation score $R \in [0, 1]$ computed from two independent tracks:
 
 \begin{equation}
-R = \alpha \cdot R_{\text{ranking}} + (1 - \alpha) \cdot R_{\text{generation}}, \quad \alpha = 0.4
+R = \alpha \cdot R_{\text{rank}} + (1 - \alpha) \cdot R_{\text{gen}}, \quad \alpha = 0.4
 \end{equation}
 
-$R_{\text{generation}}$ measures answer quality: did this node's answer win? Updated via exponential moving average after each round:
+$R_{\text{gen}}$ measures answer quality: did this node's answer win? Updated via exponential moving average after each round:
 
 \begin{equation}
 R_{\text{gen}}^{(t+1)} = (1 - \beta) \cdot R_{\text{gen}}^{(t)} + \beta \cdot \mathbb{1}[\text{won}], \quad \beta = 0.15
 \end{equation}
 
-$R_{\text{ranking}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly--a failure mode that single-track rating systems cannot detect.
+$R_{\text{rank}}$ measures judgment quality: did this node's rankings agree with BradleyTerry consensus? Updated identically with accuracy as the signal. This dual-track design catches nodes that give good answers but rank dishonestly--a failure mode that single-track rating systems cannot detect.
 
 Each node also carries an uncertainty $\sigma$, starting at 0.4 and decaying by 5\% per round to a minimum of 0.05. High uncertainty means we do not yet trust this node's rating. This is inspired by TrueSkill's Bayesian treatment of skill~\cite{trueskill}, applied here to reputation rather than game skill.
 
@@ -119,7 +119,7 @@ v = v_{\max} - (v_{\max} - v_{\min}) \cdot R \cdot (1 - \sigma), \quad v_{\max} 
 
 This reduces verification cost by an order of magnitude without sacrificing security--an approach demonstrated by Hyperbolic's Proof of Sampling protocol~\cite{posp}.
 
-Domain-specific $R_{\text{generation}}$ is tracked independently for Code, Math, Reasoning, and General. A node strong in Code but weak in Math will be selected for coding queries but not mathematical ones.
+Domain-specific $R_{\text{gen}}$ is tracked independently for Code, Math, Reasoning, and General. A node strong in Code but weak in Math will be selected for coding queries but not mathematical ones.
 
 Nodes that fail proof verification are slashed: reputation drops to zero and the node must pass recalibration before re-entering the swarm. Inactive nodes decay at 2\% per round of absence.
 
@@ -189,7 +189,7 @@ Each round settles on Solana via a single transaction containing participant key
 
 \textbf{Replay.} Proofs expire in 5 minutes and are bound to a unique public key. A proof from node $A$ cannot be submitted by node $B$.
 
-\textbf{Freeloading.} A node running a weak model will consistently lose in ranking. Its $R_{\text{generation}}$ decays via EMA, reducing both selection probability and reward share. Quality self-selects without model verification.
+\textbf{Freeloading.} A node running a weak model will consistently lose in ranking. Its $R_{\text{gen}}$ decays via EMA, reducing both selection probability and reward share. Quality self-selects without model verification.
 
 \textbf{Self-promotion.} Judges evaluate factual correctness only. Persuasive language is excluded by prompt design. Nodes cannot judge their own answers.
 
