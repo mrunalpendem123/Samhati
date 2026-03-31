@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Samhati</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#FAFAFA;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+canvas{position:fixed;top:0;left:0;z-index:0}
+nav{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:24px 48px}
+nav .logo{font-size:18px;font-weight:600;color:#1A1A1A}
+nav .links{display:flex;gap:48px}
+nav a{font-size:13px;font-weight:500;letter-spacing:0.12em;color:#333;text-decoration:none}
+nav a:hover{color:#000}
+</style>
+</head>
+<body>
+<nav>
+<span class="logo">S</span>
+<div class="links">
+<a href="https://github.com/mrunalpendem123/Samhati#readme" target="_blank">ABOUT</a>
+<a href="https://github.com/mrunalpendem123/Samhati/blob/main/whitepaper.pdf" target="_blank">WHITEPAPER</a>
+<a href="https://github.com/mrunalpendem123/Samhati#readme" target="_blank">DOCS</a>
+<a href="https://github.com/mrunalpendem123/Samhati" target="_blank">GITHUB</a>
+</div>
+</nav>
+<canvas id="c"></canvas>
+<script>
+const c=document.getElementById("c"),x=c.getContext("2d");
+let w,h,dots=[],seed=[],start=performance.now();
+const N=450;
+function resize(){w=innerWidth;h=innerHeight;c.width=w*2;c.height=h*2;c.style.width=w+"px";c.style.height=h+"px";x.setTransform(2,0,0,2,0,0)}
+resize();addEventListener("resize",resize);
+for(let i=0;i<N*4;i++)seed.push(Math.random());
+const P=[139,92,246],G=[34,197,94],A=[245,158,11],K=[236,72,153],B=[40,40,50];
+for(let i=0;i<N;i++)dots.push({x:w/2,y:h/2,tx:w/2,ty:h/2,s:0,ts:0,r:26,g:26,b:26,tr:26,tg:26,tb:26,a:0,ta:0});
+function sphere(cx,cy,r,n){const p=[];const g=Math.PI*(3-Math.sqrt(5));for(let i=0;i<n;i++){const t=i/n;const inc=Math.acos(1-2*t);const az=g*i;p.push([cx+r*Math.sin(inc)*Math.cos(az),cy+r*Math.sin(inc)*Math.sin(az)])}while(p.length<N)p.push([cx,cy]);return p}
+function set(i,px,py,s,a,r,g,b){if(i>=N)return;dots[i].tx=px;dots[i].ty=py;dots[i].ts=s;dots[i].ta=a;dots[i].tr=r;dots[i].tg=g;dots[i].tb=b}
+function hide(){for(let i=0;i<N;i++){dots[i].ts=0;dots[i].ta=0}}
+const scenes=[
+{dur:2100,conn:false,fn:()=>{hide();set(0,w/2,h/2,6,1,...P)}},
+{dur:2100,conn:false,fn:()=>{hide();for(let i=0;i<40;i++){const a=(i/40)*Math.PI*2,r=15+seed[i]*25;set(i,w/2+Math.cos(a)*r,h/2+Math.sin(a)*r,1.5+seed[i]*2,0.8,...B)}set(0,w/2,h/2,7,1,...P)}},
+{dur:2100,conn:false,fn:()=>{hide();for(let i=0;i<50;i++){const a=(i/50)*Math.PI*2,r=30+seed[i]*20;set(i,w/2+Math.cos(a)*r,h/2+Math.sin(a)*r,2+seed[i]*1.5,0.8,...(i<15?G:B))}set(0,w/2,h/2,7,1,...G)}},
+{dur:2400,conn:false,fn:()=>{hide();const cities=[[w/2-320,h/2-140],[w/2+300,h/2-110],[w/2-220,h/2+160],[w/2+340,h/2+130],[w/2-50,h/2-210],[w/2-380,h/2+40],[w/2+120,h/2+210],[w/2+400,h/2-30],[w/2-150,h/2-50],[w/2,h/2]];const cols=[G,A,K,B,G,B,A,K,G,B];for(let i=0;i<180;i++){const c=cities[i%10];const col=cols[i%10];set(i,c[0]+(seed[i*2]-0.5)*60,c[1]+(seed[i*2+1]-0.5)*60,1.5+seed[i]*2,0.75,...col)}}},
+{dur:2400,conn:true,fn:()=>{hide();const cols=[G,A,K,B];const pts=sphere(w/2,h/2,Math.min(w,h)*0.3,280);for(let i=0;i<280;i++)set(i,pts[i][0],pts[i][1],2+seed[i]*1.5,0.8,...cols[i%4])}},
+{dur:2400,conn:false,fn:()=>{hide();const doms=[{p:0.42,c:G,y:h/2-90},{p:0.16,c:A,y:h/2-30},{p:0.11,c:K,y:h/2+30},{p:0.31,c:B,y:h/2+90}];let idx=0;for(const d of doms){const n=Math.floor(d.p*120);const bw=d.p*w*0.5;for(let j=0;j<n&&idx<N;j++,idx++)set(idx,w/2-w*0.25+(j/n)*bw,d.y+(seed[idx]-0.5)*8,2.5,0.85,...d.c)}}},
+{dur:2600,conn:false,fn:()=>{hide();const doms=[{p:0.42,c:G,y:h/2-90},{p:0.16,c:A,y:h/2-30},{p:0.11,c:K,y:h/2+30},{p:0.31,c:B,y:h/2+90}];let idx=0;for(const d of doms){const n=Math.floor(d.p*120);const bw=d.p*w*0.5;const sp=d.c!==B;for(let j=0;j<n&&idx<N;j++,idx++)set(idx,w/2-w*0.25+(j/n)*bw,d.y,sp?3.5:1.5,sp?1:0.3,...d.c)}}},
+{dur:2400,conn:false,fn:()=>{hide();const pts=sphere(w/2,h/2,Math.min(w,h)*0.32,250);for(let i=5;i<250;i++)set(i,pts[i][0],pts[i][1],1,0.1,...B);set(0,w/2,h/2,10,1,...P)}},
+{dur:2600,conn:false,fn:()=>{hide();const pts=sphere(w/2,h/2,Math.min(w,h)*0.32,250);for(let i=5;i<250;i++)set(i,pts[i][0],pts[i][1],1,0.08,...B);const t=[[w/2-200,h/2-130],[w/2+180,h/2-90],[w/2-80,h/2+160]];for(let i=0;i<3;i++)set(i,t[i][0],t[i][1],7,1,...G);set(3,w/2,h/2,4,0.5,...P)}},
+{dur:2600,conn:false,fn:()=>{hide();for(let i=0;i<3;i++){const a=(i/3)*Math.PI*2;set(i,w/2+Math.cos(a)*70,h/2+Math.sin(a)*70,6,1,...G)}for(let i=3;i<60;i++){const a=(i/60)*Math.PI*6,r=40+(i/60)*80;set(i,w/2+Math.cos(a)*r,h/2+Math.sin(a)*r,1,0.3,...P)}}},
+{dur:2100,conn:false,fn:()=>{hide();set(0,w/2,h/2,14,1,...P);set(1,w/2-150,h/2-80,3,0.25,...B);set(2,w/2+140,h/2+90,3,0.25,...B);for(let i=3;i<120;i++){const a=seed[i*2]*Math.PI*2,p=seed[i*2+1],r=250*(1-p*p);set(i,w/2+Math.cos(a)*r,h/2+Math.sin(a)*r,1+p*3,0.3+p*0.7,...A)}}},
+{dur:2100,conn:false,fn:()=>{hide();const cols=15,rows=10,gw=w*0.5,gh=h*0.5;let idx=0;for(let r=0;r<rows&&idx<N;r++)for(let c=0;c<cols&&idx<N;c++,idx++){const px=w/2-gw/2+(c/(cols-1))*gw,py=h/2-gh/2+(r/(rows-1))*gh;const hl=(r===4||r===5)&&c>5&&c<12;set(idx,px,py,hl?3.5:2,hl?1:0.3,...(hl?P:B))}}},
+{dur:2600,conn:true,fn:()=>{hide();const cols=[G,A,K,B,P];const pts=sphere(w/2,h/2,Math.min(w,h)*0.4,N);for(let i=0;i<N;i++)set(i,pts[i][0],pts[i][1],2+seed[i]*2,0.85,...cols[i%5])}},
+{dur:1000,conn:false,fn:()=>{hide();set(0,w/2,h/2,6,1,...P)}},
+];
+let total=0;const tl=scenes.map(s=>{const e={start:total,end:total+s.dur,...s};total+=s.dur;return e});
+let last=-1;
+function draw(){
+x.clearRect(0,0,w,h);
+const el=(performance.now()-start)%total;
+let si=0;for(let i=0;i<tl.length;i++)if(el>=tl[i].start&&el<tl[i].end){si=i;break}
+if(si!==last){last=si;tl[si].fn()}
+for(const d of dots){d.x+=(d.tx-d.x)*0.14;d.y+=(d.ty-d.y)*0.14;d.s+=(d.ts-d.s)*0.18;d.a+=(d.ta-d.a)*0.15;d.r+=(d.tr-d.r)*0.15;d.g+=(d.tg-d.g)*0.15;d.b+=(d.tb-d.b)*0.15}
+if(tl[si].conn){x.lineWidth=0.3;for(let i=0;i<N;i++){if(dots[i].a<0.3)continue;for(let j=i+1;j<Math.min(i+8,N);j++){if(dots[j].a<0.3)continue;const dx=dots[i].x-dots[j].x,dy=dots[i].y-dots[j].y,dist=Math.sqrt(dx*dx+dy*dy);if(dist<50){x.beginPath();x.moveTo(dots[i].x,dots[i].y);x.lineTo(dots[j].x,dots[j].y);x.strokeStyle=`rgba(80,80,100,${(1-dist/50)*0.15})`;x.stroke()}}}}
+for(const d of dots){if(d.a<0.01||d.s<0.1)continue;if(d.s>5){x.beginPath();x.arc(d.x,d.y,d.s*3,0,Math.PI*2);x.fillStyle=`rgba(${Math.round(d.r)},${Math.round(d.g)},${Math.round(d.b)},${d.a*0.06})`;x.fill()}x.beginPath();x.arc(d.x,d.y,d.s,0,Math.PI*2);x.fillStyle=`rgba(${Math.round(d.r)},${Math.round(d.g)},${Math.round(d.b)},${d.a})`;x.fill()}
+requestAnimationFrame(draw)}
+draw();
+</script>
+</body>
+</html>
